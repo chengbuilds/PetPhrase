@@ -1,11 +1,13 @@
 <div align="center">
 
-# 🐾 PetPhrase
+# 🐾 PetPhrase — Windows 桌宠常用语与剪贴板短语管理器
 
 **一只桌宠 + 你的常用语面板**
 
 桌宠静坐桌面,点它弹出常用语面板,点一条短语立即复制到剪贴板。<br>
-客服回复、报销话术、代码片段——一次点击,不打断手头工作。
+客服话术、快捷回复、报销模板、代码片段——一次点击,不打断手头工作。
+
+<sub>**English** · PetPhrase is a lightweight desktop pet + phrase manager for Windows: a petdex-style pet sits on your desktop — click it to pop up your phrase panel, click a phrase to copy it to the clipboard. Great for canned responses, quick replies, email templates and code snippets. Single-process native app built with Rust + Slint.</sub>
 
 [![Release](https://img.shields.io/github/v/release/wangcheng6-ai/PetPhrase?color=f97316&label=release)](https://github.com/wangcheng6-ai/PetPhrase/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/wangcheng6-ai/PetPhrase/total?color=blue&label=downloads)](https://github.com/wangcheng6-ai/PetPhrase/releases)
@@ -25,7 +27,7 @@
 
 | 桌宠静坐桌面 | 点它,面板贴宠弹出 | 挑选桌宠、调大小、换主题 | 管理分组与常用语 |
 |:---:|:---:|:---:|:---:|
-| <img src="screenshots/pet-desktop.png" height="180" alt="桌宠"> | <img src="screenshots/panel.png" height="180" alt="常用语面板"> | <img src="screenshots/settings-pets.png" height="180" alt="桌宠选择与外观设置"> | <img src="screenshots/settings-phrases.png" height="180" alt="常用语管理"> |
+| <img src="screenshots/pet-desktop.png" height="180" alt="Windows 桌宠悬浮在桌面上(desktop pet)"> | <img src="screenshots/panel.png" height="180" alt="点击桌宠弹出的常用语快捷复制面板(phrase panel)"> | <img src="screenshots/settings-pets.png" height="180" alt="桌宠选择、大小与主题外观设置"> | <img src="screenshots/settings-phrases.png" height="180" alt="常用语分组与短语管理设置"> |
 
 ## 🚀 快速上手
 
