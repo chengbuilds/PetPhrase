@@ -1,6 +1,6 @@
 [package]
 name = "petphrase-slint"
-version = "0.5.0"
+version = "0.6.0"
 description = "PetPhrase 桌宠常用语工具(Slint 原生版)"
 edition = "2021"
 
