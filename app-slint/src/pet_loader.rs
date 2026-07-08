@@ -51,7 +51,12 @@ fn load_pet(dir: &Path) -> Option<PetInfo> {
         }
     };
 
-    Some(PetInfo { id, name, spritesheet, error })
+    Some(PetInfo {
+        id,
+        name,
+        spritesheet,
+        error,
+    })
 }
 
 /// 解码雪碧图并裁出 idle 首帧作缩略图。
@@ -76,7 +81,9 @@ pub fn load_thumb(path: &str) -> slint::Image {
 pub fn scan_pets(roots: &[&Path]) -> Vec<PetInfo> {
     let mut pets: Vec<PetInfo> = Vec::new();
     for root in roots {
-        let Ok(entries) = fs::read_dir(root) else { continue };
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
         for entry in entries.flatten() {
             if let Some(pet) = load_pet(&entry.path()) {
                 if !pets.iter().any(|p| p.id == pet.id) {
@@ -120,7 +127,12 @@ mod tests {
     #[test]
     fn scans_valid_pet() {
         let root = tempdir().unwrap();
-        make_pet(root.path(), "kun-like", Some(r#"{"name":"Kun"}"#), Some("spritesheet.webp"));
+        make_pet(
+            root.path(),
+            "kun-like",
+            Some(r#"{"name":"Kun"}"#),
+            Some("spritesheet.webp"),
+        );
         let pets = scan_pets(&[root.path()]);
         assert_eq!(pets.len(), 1);
         assert_eq!(pets[0].name, "Kun");
@@ -150,9 +162,24 @@ mod tests {
     fn merges_roots_in_order_first_wins() {
         let a = tempdir().unwrap();
         let b = tempdir().unwrap();
-        make_pet(a.path(), "dup", Some(r#"{"name":"FromA"}"#), Some("spritesheet.png"));
-        make_pet(b.path(), "dup", Some(r#"{"name":"FromB"}"#), Some("spritesheet.png"));
-        make_pet(b.path(), "only-b", Some(r#"{"name":"B"}"#), Some("spritesheet.png"));
+        make_pet(
+            a.path(),
+            "dup",
+            Some(r#"{"name":"FromA"}"#),
+            Some("spritesheet.png"),
+        );
+        make_pet(
+            b.path(),
+            "dup",
+            Some(r#"{"name":"FromB"}"#),
+            Some("spritesheet.png"),
+        );
+        make_pet(
+            b.path(),
+            "only-b",
+            Some(r#"{"name":"B"}"#),
+            Some("spritesheet.png"),
+        );
         let pets = scan_pets(&[a.path(), b.path()]);
         assert_eq!(pets.len(), 2);
         assert_eq!(pets.iter().find(|p| p.id == "dup").unwrap().name, "FromA");

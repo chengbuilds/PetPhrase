@@ -15,7 +15,7 @@
 [![License](https://img.shields.io/github/license/wangcheng6-ai/PetPhrase?color=success)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/wangcheng6-ai/PetPhrase?style=social)](https://github.com/wangcheng6-ai/PetPhrase/stargazers)
 
-**单进程原生应用:安装包 5.7MB · 常驻内存 ~23MB · 冷启动 ~0.3s**
+**单进程原生应用:安装包不到 10MB · 常驻内存约为 WebView 同类方案的 1/10 · 冷启动秒开**
 
 </div>
 
@@ -45,6 +45,7 @@
 - **分组管理**:增删改、长按拖动排序、12 个分组图标
 - **主题**:亚克力磨砂 / 实底浅色两种面板主题
 - **数据**:开机自启可选;JSON 导入导出;数据原子写入 + 启动备份自动恢复,卸载重装不丢
+- **一键更新**:自动/手动检查新版本(可关),一键下载校验并静默升级,装完自动回到桌面
 - **标准安装/卸载**:NSIS 安装包,含 `uninstall.exe` 与「应用和功能」卸载入口,卸载时可选保留数据
 
 ## 🐱 换一只喜欢的桌宠
@@ -98,10 +99,10 @@ npx petdex@latest install doraemon
 
 ```bash
 cd app-slint
-cargo test                # 27 个单元测试
+cargo test                # 单元测试
 cargo build --release     # 产出 target/release/PetPhrase.exe
 # 打包安装程序(需 NSIS makensis):
-makensis installer.nsi    # 产出 target/PetPhrase_0.5.0_x64-setup.exe
+makensis installer.nsi    # 产出 target/PetPhrase_<版本>_x64-setup.exe
 ```
 
 数据文件位于 `%APPDATA%\PetPhrase\{phrases.json, settings.json}`。

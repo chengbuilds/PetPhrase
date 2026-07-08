@@ -161,17 +161,30 @@ export component InputArea inherits Rectangle {
     background: #ffffff;
     forward-focus: ti;
     clip: true;
-    Flickable {
+    fl := Flickable {
         x: 10px;
         y: 8px;
         width: parent.width - 20px;
         height: parent.height - 16px;
         viewport-height: Math.max(self.height, ti.preferred-height);
+        // 拖拽平移必须关:Flickable 默认会在按下 500ms 内位移超 8px 时抢走鼠标 grab
+        // 去平移视口,TextInput 拖选当场中断(官方 ScrollView 同样显式关);滚轮不受影响
+        interactive: false;
         ti := TextInput {
             single-line: false;
             wrap: word-wrap;
             font-size: 12.5px;
             color: Theme.text-primary;
+            page-height: fl.height;
+            // 视口跟随光标(官方 textedit-base 同款):拖选/键盘移动超出可视区时自动滚,
+            // 20px 是官方口径的单行高度余量
+            cursor-position-changed(cpos) => {
+                if (cpos.y + fl.viewport-y < 0px) {
+                    fl.viewport-y = Math.min(0px, Math.max(fl.height - self.height, - cpos.y));
+                } else if (cpos.y + fl.viewport-y > fl.height - 20px) {
+                    fl.viewport-y = Math.min(0px, Math.max(fl.height - self.height, fl.height - cpos.y - 20px));
+                }
+            }
         }
     }
     if ti.text == "" && !ti.has-focus: Text {
@@ -184,6 +197,30 @@ export component InputArea inherits Rectangle {
     TouchArea {
         visible: !ti.has-focus;
         clicked => { ti.focus(); }
+    }
+}
+
+/// 开关(38×22 胶囊,自启/自动更新等布尔设置共用)
+export component ToggleSwitch inherits Rectangle {
+    in property <bool> on;
+    callback toggled(bool);
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.on ? Theme.accent : #cbd5e1;
+    animate background { duration: 150ms; }
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        x: root.on ? parent.width - self.width - 2px : 2px;
+        y: 2px;
+        animate x { duration: 150ms; easing: ease-out; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.on); }
     }
 }
 

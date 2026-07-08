@@ -70,6 +70,9 @@ export component PanelWindow inherits Window {
     in property <bool> editor-is-add;
     callback editor-saved(string);
 
+    // 保存失败横幅文本(Rust 灌入,空 = 无错误;保存成功自动清,点横幅手动关)
+    in-out property <string> save-error;
+
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -484,6 +487,33 @@ export component PanelWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+
+        // ---- 保存失败横幅(压底浮层;点击关闭) ----
+        if root.save-error != "": Rectangle {
+            x: 12px;
+            y: root.height - 42px;
+            width: root.width - 24px;
+            height: 32px;
+            border-radius: 8px;
+            background: #fee2e2;
+            border-width: 1px;
+            border-color: Theme.danger;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                Text {
+                    text: root.save-error;
+                    color: Theme.danger;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.save-error = ""; }
             }
         }
     }

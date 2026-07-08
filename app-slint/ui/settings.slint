@@ -1,7 +1,7 @@
 import { ListView, ScrollView } from "std-widgets.slint";
 import {
     Theme, GroupRowUi, PhraseRowUi, PetCardUi, GroupIcon, IconButton,
-    PrimaryButton, GhostButton, InputArea, SegmentedPair, SegmentedRow
+    PrimaryButton, GhostButton, InputArea, SegmentedPair, SegmentedRow, ToggleSwitch
 } from "common.slint";
 
 export component SettingsWindow inherits Window {
@@ -16,6 +16,16 @@ export component SettingsWindow inherits Window {
     in-out property <bool> autostart-on;
     in property <string> custom-dir;
     in property <string> data-msg;
+
+    // 关于与更新
+    in property <string> app-version;
+    in property <string> update-msg;
+    in property <bool> update-available;
+    in property <bool> update-busy;
+    in-out property <bool> auto-check-on;
+    callback check-update;
+    callback do-update;
+    callback auto-check-toggled(bool);
 
     // 确认框
     in-out property <bool> confirm-visible: false;
@@ -611,27 +621,11 @@ export component SettingsWindow inherits Window {
                 HorizontalLayout {
                     alignment: start;
                     spacing: 8px;
-                    Rectangle {
-                        width: 38px;
-                        height: 22px;
-                        border-radius: 11px;
-                        background: root.autostart-on ? Theme.accent : #cbd5e1;
-                        animate background { duration: 150ms; }
-                        Rectangle {
-                            width: 18px;
-                            height: 18px;
-                            border-radius: 9px;
-                            background: #ffffff;
-                            x: root.autostart-on ? parent.width - self.width - 2px : 2px;
-                            y: 2px;
-                            animate x { duration: 150ms; easing: ease-out; }
-                        }
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                root.autostart-on = !root.autostart-on;
-                                root.autostart-toggled(root.autostart-on);
-                            }
+                    ToggleSwitch {
+                        on: root.autostart-on;
+                        toggled(v) => {
+                            root.autostart-on = v;
+                            root.autostart-toggled(v);
                         }
                     }
                     Text { text: "开机自动启动"; vertical-alignment: center; color: Theme.text-secondary; }
@@ -645,6 +639,42 @@ export component SettingsWindow inherits Window {
                     GhostButton { text: "导出常用语…"; icon: @image-url("icons/download.svg"); clicked => { root.do-export(); } }
                     GhostButton { text: "导入常用语…"; icon: @image-url("icons/upload.svg"); clicked => { root.do-import(); } }
                     Text { text: root.data-msg; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                }
+
+                Rectangle { height: 8px; }
+                Text { text: "关于与更新"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Text {
+                        text: "当前版本 v" + root.app-version;
+                        font-size: 12.5px;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                    if !root.update-available: GhostButton {
+                        text: "检查更新";
+                        enabled: !root.update-busy;
+                        clicked => { root.check-update(); }
+                    }
+                    if root.update-available: PrimaryButton {
+                        text: "立即更新";
+                        enabled: !root.update-busy;
+                        clicked => { root.do-update(); }
+                    }
+                    Text { text: root.update-msg; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 8px;
+                    ToggleSwitch {
+                        on: root.auto-check-on;
+                        toggled(v) => {
+                            root.auto-check-on = v;
+                            root.auto-check-toggled(v);
+                        }
+                    }
+                    Text { text: "启动时自动检查更新"; vertical-alignment: center; color: Theme.text-secondary; }
                 }
             }
         }

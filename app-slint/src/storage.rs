@@ -32,8 +32,14 @@ impl Default for PhraseData {
                 name: "常用".into(),
                 icon: Some("star".into()),
                 phrases: vec![
-                    Phrase { id: "p-1".into(), text: "收到,马上处理".into() },
-                    Phrase { id: "p-2".into(), text: "好的,没问题".into() },
+                    Phrase {
+                        id: "p-1".into(),
+                        text: "收到,马上处理".into(),
+                    },
+                    Phrase {
+                        id: "p-2".into(),
+                        text: "好的,没问题".into(),
+                    },
                     Phrase {
                         id: "p-3".into(),
                         text: "您好,感谢您的反馈,我们已经记录了这个问题,会尽快给您答复。".into(),
@@ -59,6 +65,9 @@ pub struct Settings {
     /// 桌宠渲染缩放(1.0 = 原始 192×208)
     #[serde(default = "default_pet_scale")]
     pub pet_scale: f32,
+    /// 启动后自动检查更新(仅版本号查询,失败静默)
+    #[serde(default = "default_true")]
+    pub auto_check_update: bool,
 }
 
 fn default_pet_id() -> String {
@@ -70,6 +79,9 @@ fn default_theme() -> String {
 fn default_pet_scale() -> f32 {
     1.0
 }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -80,6 +92,7 @@ impl Default for Settings {
             last_group: None,
             custom_pet_dir: None,
             pet_scale: default_pet_scale(),
+            auto_check_update: true,
         }
     }
 }
@@ -107,20 +120,26 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, contents)?;
-    if path.exists() {
-        let old = path.with_extension("old");
-        let _ = fs::remove_file(&old);
-        fs::rename(path, &old)?;
-        if let Err(e) = fs::rename(&tmp, path) {
-            let _ = fs::rename(&old, path); // 回滚
-            return Err(e);
-        }
-        let _ = fs::remove_file(&old);
-        Ok(())
-    } else {
-        fs::rename(&tmp, path)
+    let result = fs::write(&tmp, contents).and_then(|_| swap_in(path, &tmp));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp); // 写入或换入失败都不留 .tmp 垃圾
     }
+    result
+}
+
+fn swap_in(path: &Path, tmp: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return fs::rename(tmp, path);
+    }
+    let old = path.with_extension("old");
+    let _ = fs::remove_file(&old);
+    fs::rename(path, &old)?;
+    if let Err(e) = fs::rename(tmp, path) {
+        let _ = fs::rename(&old, path); // 回滚
+        return Err(e);
+    }
+    let _ = fs::remove_file(&old);
+    Ok(())
 }
 
 /// 主文件 → .old → 备份 → 默认;从备份恢复时回写主文件。
@@ -129,7 +148,7 @@ pub fn load_phrases(dir: &Path) -> PhraseData {
     if let Some(data) = read_json_with_old::<PhraseData>(&main) {
         return data;
     }
-    if let Some(data) = read_json::<PhraseData>(&dir.join(BACKUP_FILE)) {
+    if let Some(data) = read_json_with_old::<PhraseData>(&dir.join(BACKUP_FILE)) {
         let _ = save_phrases(dir, &data); // 恢复主文件
         return data;
     }
@@ -141,20 +160,24 @@ pub fn save_phrases(dir: &Path, data: &PhraseData) -> io::Result<()> {
     atomic_write(&dir.join(PHRASES_FILE), &json)
 }
 
-/// 启动时调用:当前主文件可读则拷为备份。
-pub fn backup_phrases(dir: &Path) {
-    let main = dir.join(PHRASES_FILE);
-    if read_json::<PhraseData>(&main).is_some() {
-        let _ = fs::copy(&main, dir.join(BACKUP_FILE));
+/// 主文件语义可读才写备份;备份本身也走原子换入,防拷贝中断毁掉上一份好备份。
+fn backup_json<T: DeserializeOwned>(main: &Path, backup: &Path) {
+    let Ok(text) = fs::read_to_string(main) else {
+        return;
+    };
+    if serde_json::from_str::<T>(&text).is_ok() {
+        let _ = atomic_write(backup, &text);
     }
 }
 
-/// 启动时调用:当前设置可读则拷为备份(与 phrases 同等保护)。
+/// 启动时调用:当前主文件可读则存为备份。
+pub fn backup_phrases(dir: &Path) {
+    backup_json::<PhraseData>(&dir.join(PHRASES_FILE), &dir.join(BACKUP_FILE));
+}
+
+/// 启动时调用:当前设置可读则存为备份(与 phrases 同等保护)。
 pub fn backup_settings(dir: &Path) {
-    let main = dir.join(SETTINGS_FILE);
-    if read_json::<Settings>(&main).is_some() {
-        let _ = fs::copy(&main, dir.join(SETTINGS_BACKUP_FILE));
-    }
+    backup_json::<Settings>(&dir.join(SETTINGS_FILE), &dir.join(SETTINGS_BACKUP_FILE));
 }
 
 /// 主文件 → .old → 备份 → 默认;从备份恢复时回写主文件。
@@ -163,7 +186,7 @@ pub fn load_settings(dir: &Path) -> Settings {
     if let Some(s) = read_json_with_old::<Settings>(&main) {
         return s;
     }
-    if let Some(s) = read_json::<Settings>(&dir.join(SETTINGS_BACKUP_FILE)) {
+    if let Some(s) = read_json_with_old::<Settings>(&dir.join(SETTINGS_BACKUP_FILE)) {
         let _ = save_settings(dir, &s);
         return s;
     }
@@ -175,10 +198,17 @@ pub fn save_settings(dir: &Path, s: &Settings) -> io::Result<()> {
     atomic_write(&dir.join(SETTINGS_FILE), &json)
 }
 
-pub fn export_phrases(dir: &Path, dest: &Path) -> io::Result<()> {
-    let data = load_phrases(dir);
-    let json = serde_json::to_string_pretty(&data).map_err(io::Error::other)?;
-    atomic_write(dest, &json)
+/// 导出内存数据到用户指定路径。同目录临时文件写完再 rename 换入:
+/// 失败不碰旧导出;不用 .old 换入方案(会误删用户同名 .old);
+/// Windows 下 std 的 rename 带 MOVEFILE_REPLACE_EXISTING,可直接覆盖已有目标。
+pub fn export_phrases(data: &PhraseData, dest: &Path) -> io::Result<()> {
+    let json = serde_json::to_string_pretty(data).map_err(io::Error::other)?;
+    let tmp = dest.with_extension("petphrase-export-tmp");
+    let result = fs::write(&tmp, &json).and_then(|_| fs::rename(&tmp, dest));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 const MAX_GROUPS: usize = 500;
@@ -194,7 +224,11 @@ fn sanitize_import(data: &mut PhraseData) -> Result<(), String> {
     let mut n = 0usize;
     for g in &mut data.groups {
         let name = g.name.trim();
-        g.name = if name.is_empty() { "未命名".into() } else { name.to_string() };
+        g.name = if name.is_empty() {
+            "未命名".into()
+        } else {
+            name.to_string()
+        };
         while g.id.trim().is_empty() || !ids.insert(g.id.clone()) {
             n += 1;
             g.id = format!("g-imp{n}");
@@ -206,7 +240,11 @@ fn sanitize_import(data: &mut PhraseData) -> Result<(), String> {
                 g.phrases.len()
             ));
         }
-        if let Some(p) = g.phrases.iter().find(|p| p.text.chars().count() > MAX_TEXT_CHARS) {
+        if let Some(p) = g
+            .phrases
+            .iter()
+            .find(|p| p.text.chars().count() > MAX_TEXT_CHARS)
+        {
             return Err(format!(
                 "存在超长短语({} 字,上限 {MAX_TEXT_CHARS})",
                 p.text.chars().count()
@@ -242,7 +280,10 @@ mod tests {
     fn save_then_load_roundtrip() {
         let dir = tempdir().unwrap();
         let mut data = PhraseData::default();
-        data.groups[0].phrases.push(Phrase { id: "x".into(), text: "测试".into() });
+        data.groups[0].phrases.push(Phrase {
+            id: "x".into(),
+            text: "测试".into(),
+        });
         save_phrases(dir.path(), &data).unwrap();
         assert_eq!(load_phrases(dir.path()), data);
     }
@@ -292,9 +333,22 @@ mod tests {
     }
 
     #[test]
+    fn load_falls_back_to_backup_old_when_backup_swap_interrupted() {
+        let dir = tempdir().unwrap();
+        let data = PhraseData::default();
+        // 模拟备份换入中断:主文件缺失,备份只剩 .old
+        let json = serde_json::to_string(&data).unwrap();
+        fs::write(dir.path().join("phrases.backup.old"), &json).unwrap();
+        assert_eq!(load_phrases(dir.path()), data);
+    }
+
+    #[test]
     fn settings_recover_from_backup_when_main_corrupt() {
         let dir = tempdir().unwrap();
-        let s = Settings { theme: "solid".into(), ..Settings::default() };
+        let s = Settings {
+            theme: "solid".into(),
+            ..Settings::default()
+        };
         save_settings(dir.path(), &s).unwrap();
         backup_settings(dir.path());
         fs::write(dir.path().join("settings.json"), "{broken").unwrap();
@@ -329,7 +383,9 @@ mod tests {
         let huge = "x".repeat(10_001);
         fs::write(
             &src,
-            format!(r#"{{"groups":[{{"id":"a","name":"A","phrases":[{{"id":"p","text":"{huge}"}}]}}]}}"#),
+            format!(
+                r#"{{"groups":[{{"id":"a","name":"A","phrases":[{{"id":"p","text":"{huge}"}}]}}]}}"#
+            ),
         )
         .unwrap();
         let err = import_phrases(dir.path(), &src).unwrap_err();
@@ -343,7 +399,11 @@ mod tests {
         assert_eq!(s.pet_id, "default");
         assert_eq!(s.theme, "acrylic");
         assert_eq!(s.pet_scale, 1.0);
-        let changed = Settings { pet_pos: Some((100, 200)), pet_scale: 0.75, ..s };
+        let changed = Settings {
+            pet_pos: Some((100, 200)),
+            pet_scale: 0.75,
+            ..s
+        };
         save_settings(dir.path(), &changed).unwrap();
         assert_eq!(load_settings(dir.path()), changed);
     }
@@ -360,10 +420,22 @@ mod tests {
     fn export_then_import_roundtrip() {
         let dir = tempdir().unwrap();
         let data = PhraseData::default();
-        save_phrases(dir.path(), &data).unwrap();
         let out = dir.path().join("out.json");
-        export_phrases(dir.path(), &out).unwrap();
+        export_phrases(&data, &out).unwrap();
         let dir2 = tempdir().unwrap();
         assert_eq!(import_phrases(dir2.path(), &out).unwrap(), data);
+    }
+
+    #[test]
+    fn export_overwrites_existing_file_and_leaves_no_tmp() {
+        let dir = tempdir().unwrap();
+        let out = dir.path().join("out.json");
+        fs::write(&out, "旧导出,不该被截断成半截").unwrap();
+        let data = PhraseData::default();
+        export_phrases(&data, &out).unwrap();
+        // rename 覆盖成功:内容是完整新 JSON,且无临时文件残留
+        let text = fs::read_to_string(&out).unwrap();
+        assert!(serde_json::from_str::<PhraseData>(&text).is_ok());
+        assert!(!out.with_extension("petphrase-export-tmp").exists());
     }
 }

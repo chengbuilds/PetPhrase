@@ -67,7 +67,7 @@ def main() -> None:
                 draw_blob(d, cx, base_y, 1.0 + 0.06 * math.sin(t), lean=0)
             sheet.paste(frame, (col * FRAME_W, row * FRAME_H))
 
-    out = Path(__file__).resolve().parent.parent / "src-tauri" / "pets" / "default"
+    out = Path(__file__).resolve().parent.parent / "app-slint" / "pets" / "default"
     out.mkdir(parents=True, exist_ok=True)
     sheet.save(out / "spritesheet.png")
     (out / "pet.json").write_text(

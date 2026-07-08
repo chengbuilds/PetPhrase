@@ -23,7 +23,13 @@ pub fn is_short(text: &str) -> bool {
 /// ponytail: 估算而非真实测量,±10% 误差由 chip 弹性 padding 吸收;偏差明显再接真实测量。
 pub fn estimate_text_width(text: &str, font_px: f32) -> f32 {
     text.chars()
-        .map(|c| if (c as u32) < 0x2E80 { font_px * 0.55 } else { font_px })
+        .map(|c| {
+            if (c as u32) < 0x2E80 {
+                font_px * 0.55
+            } else {
+                font_px
+            }
+        })
         .sum()
 }
 
@@ -50,7 +56,12 @@ struct Ctx {
 
 impl Ctx {
     fn new(avail: f32) -> Self {
-        Ctx { items: Vec::new(), cursor_x: 0.0, cursor_y: 0.0, avail }
+        Ctx {
+            items: Vec::new(),
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            avail,
+        }
     }
 
     fn newline_if_needed(&mut self, w: f32) {
@@ -86,7 +97,7 @@ impl Ctx {
 
     fn push_card(&mut self, gi: usize, pi: usize, text: &str, badge: &str) {
         self.close_row();
-        let inner_w = self.avail - CARD_PAD * 2.0;
+        let inner_w = (self.avail - CARD_PAD * 2.0).max(1.0); // avail 现为常量宽,兜底防改小后出负宽
         let text_w = estimate_text_width(text, FONT_PX);
         let lines_est = (text_w / inner_w).ceil().max(1.0) + text.matches('\n').count() as f32;
         let lines = lines_est.min(2.0);
@@ -110,7 +121,9 @@ impl Ctx {
 /// 当前分组的混排布局(连续短句成气泡流,长句独占卡片)
 pub fn layout_group(data: &PhraseData, group_idx: usize, avail_w: f32) -> Vec<LaidItem> {
     let mut ctx = Ctx::new(avail_w);
-    let Some(group) = data.groups.get(group_idx) else { return ctx.items };
+    let Some(group) = data.groups.get(group_idx) else {
+        return ctx.items;
+    };
     for (pi, p) in group.phrases.iter().enumerate() {
         if is_short(&p.text) {
             ctx.push_chip(group_idx, pi, &p.text);
@@ -175,7 +188,11 @@ pub fn panel_position(pet: Rect, panel_w: f32, panel_h: f32, work: Rect) -> Plac
     y = y.clamp(work.y, (work.y + work.h - panel_h).max(work.y));
 
     let right_room = work.x + work.w - (x + panel_w);
-    Placement { x, y, right_side: right_room >= 260.0 }
+    Placement {
+        x,
+        y,
+        right_side: right_room >= 260.0,
+    }
 }
 
 #[cfg(test)]
@@ -228,7 +245,10 @@ mod tests {
     fn chip_wraps_when_row_full() {
         let mut d = data();
         d.groups[0].phrases = (0..8)
-            .map(|i| Phrase { id: i.to_string(), text: "八字长度短句啊".into() })
+            .map(|i| Phrase {
+                id: i.to_string(),
+                text: "八字长度短句啊".into(),
+            })
             .collect();
         let items = layout_group(&d, 0, 280.0);
         let rows: std::collections::BTreeSet<i32> = items.iter().map(|i| i.y as i32).collect();
@@ -250,15 +270,50 @@ mod tests {
 
     #[test]
     fn panel_position_flip_and_clamp() {
-        let work = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1040.0 };
-        let p = panel_position(Rect { x: 800.0, y: 600.0, w: 192.0, h: 208.0 }, 300.0, 400.0, work);
+        let work = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1920.0,
+            h: 1040.0,
+        };
+        let p = panel_position(
+            Rect {
+                x: 800.0,
+                y: 600.0,
+                w: 192.0,
+                h: 208.0,
+            },
+            300.0,
+            400.0,
+            work,
+        );
         assert_eq!((p.x, p.y), (800.0, 600.0 - 400.0 - 12.0));
         assert!(p.right_side);
         // 贴顶翻下方
-        let p2 = panel_position(Rect { x: 800.0, y: 10.0, w: 192.0, h: 208.0 }, 300.0, 400.0, work);
+        let p2 = panel_position(
+            Rect {
+                x: 800.0,
+                y: 10.0,
+                w: 192.0,
+                h: 208.0,
+            },
+            300.0,
+            400.0,
+            work,
+        );
         assert_eq!(p2.y, 10.0 + 208.0 + 12.0);
         // 贴右缘:钳制且预览贴左
-        let p3 = panel_position(Rect { x: 1700.0, y: 600.0, w: 192.0, h: 208.0 }, 300.0, 400.0, work);
+        let p3 = panel_position(
+            Rect {
+                x: 1700.0,
+                y: 600.0,
+                w: 192.0,
+                h: 208.0,
+            },
+            300.0,
+            400.0,
+            work,
+        );
         assert!(p3.x + 300.0 <= 1920.0);
         assert!(!p3.right_side);
     }

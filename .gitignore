@@ -34,3 +34,4 @@ docs/
 src-tauri/
 node_modules/
 .vite/
+video/
