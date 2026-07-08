@@ -6,7 +6,7 @@
 <title>PetPhrase — Windows 桌宠常用语/话术工具,点宠物一键复制快捷回复</title>
 <meta name="description" content="PetPhrase 是一款免费开源的 Windows 桌宠常用语工具:桌宠静坐桌面,点击弹出常用语面板,客服话术、快捷回复、代码片段一键复制到剪贴板。Rust + Slint 原生开发,轻量低占用,兼容 petdex 桌宠生态。">
 <link rel="canonical" href="https://wangcheng6-ai.github.io/PetPhrase/">
-<link rel="icon" href="img/pet-desktop.png">
+<link rel="icon" href="img/pet-hero.png">
 <meta property="og:type" content="website">
 <meta property="og:title" content="PetPhrase — Windows 桌宠常用语/话术工具">
 <meta property="og:description" content="桌宠静坐桌面,点击弹出常用语面板,一键复制客服话术、快捷回复、代码片段。免费开源,轻量原生。">
@@ -104,8 +104,9 @@ nav.site a:hover { color: var(--accent-deep); text-decoration: none; }
   box-shadow: 0 4px 14px #0f172a14; white-space: nowrap;
 }
 .bubble.accent { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-deep); font-weight: 600; }
+.bubble { z-index: 2; }
 .hero-visual img.pet {
-  position: absolute; right: 18px; bottom: 0; width: 170px;
+  position: absolute; right: 18px; bottom: 0; width: 170px; z-index: 1;
   image-rendering: pixelated;
   filter: drop-shadow(0 10px 18px #0f172a22);
 }
@@ -158,7 +159,7 @@ footer.site .links { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 1
 
 <div class="wrap">
 <header class="site">
-  <div class="logo"><img src="img/pet-desktop.png" alt="PetPhrase 桌宠 logo">PetPhrase</div>
+  <div class="logo"><img src="img/pet-hero.png" alt="PetPhrase 桌宠 logo">PetPhrase</div>
   <nav class="site" aria-label="页内导航">
     <a href="#features">功能</a>
     <a href="#petdex">换桌宠</a>
@@ -184,7 +185,7 @@ footer.site .links { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 1
     <span class="bubble" style="top: 32%; right: 18%;">好的,马上为您处理</span>
     <span class="bubble" style="top: 56%; right: 40%;">收到,感谢您的反馈</span>
     <span class="bubble accent" style="bottom: 18%; right: 62%;">已复制 ✓</span>
-    <img class="pet" src="img/pet-desktop.png" alt="PetPhrase Windows 桌宠">
+    <img class="pet" src="img/pet-hero.png" alt="PetPhrase Windows 桌宠">
   </div>
 </section>
 
