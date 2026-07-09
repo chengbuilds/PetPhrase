@@ -7,8 +7,8 @@
 use std::path::Path;
 use std::process::Command;
 
-const RELEASES_LATEST_URL: &str = "https://github.com/wangcheng6-ai/PetPhrase/releases/latest";
-const DOWNLOAD_BASE: &str = "https://github.com/wangcheng6-ai/PetPhrase/releases/download";
+const RELEASES_LATEST_URL: &str = "https://github.com/chengbuilds/PetPhrase/releases/latest";
+const DOWNLOAD_BASE: &str = "https://github.com/chengbuilds/PetPhrase/releases/download";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CHECK_TIMEOUT_SECS: &str = "10";
 const DOWNLOAD_TIMEOUT_SECS: &str = "300";
@@ -171,7 +171,7 @@ mod tests {
         let headers = "HTTP/1.1 200 Connection established\r\n\
                        HTTP/1.1 302 Found\r\n\
                        Server: GitHub.com\r\n\
-                       Location: https://github.com/wangcheng6-ai/PetPhrase/releases/tag/v0.6.0\r\n\
+                       Location: https://github.com/chengbuilds/PetPhrase/releases/tag/v0.6.0\r\n\
                        Content-Length: 0\r\n";
         assert_eq!(parse_redirect_tag(headers).as_deref(), Some("v0.6.0"));
         assert_eq!(
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(u.version, "0.6.0");
         assert_eq!(
             u.setup_url,
-            "https://github.com/wangcheng6-ai/PetPhrase/releases/download/v0.6.0/PetPhrase_0.6.0_x64-setup.exe"
+            "https://github.com/chengbuilds/PetPhrase/releases/download/v0.6.0/PetPhrase_0.6.0_x64-setup.exe"
         );
         assert_eq!(u.sha256_url, format!("{}.sha256", u.setup_url));
     }

@@ -9,13 +9,13 @@
 
 <sub>**English** · PetPhrase is a lightweight desktop pet + phrase manager for Windows: a petdex-style pet sits on your desktop — click it to pop up your phrase panel, click a phrase to copy it to the clipboard. Great for canned responses, quick replies, email templates and code snippets. Single-process native app built with Rust + Slint.</sub>
 
-[![Release](https://img.shields.io/github/v/release/wangcheng6-ai/PetPhrase?color=f97316&label=release)](https://github.com/wangcheng6-ai/PetPhrase/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/wangcheng6-ai/PetPhrase/total?color=blue&label=downloads)](https://github.com/wangcheng6-ai/PetPhrase/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d6?logo=windows)](https://github.com/wangcheng6-ai/PetPhrase/releases/latest)
+[![Release](https://img.shields.io/github/v/release/chengbuilds/PetPhrase?color=f97316&label=release)](https://github.com/chengbuilds/PetPhrase/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/chengbuilds/PetPhrase/total?color=blue&label=downloads)](https://github.com/chengbuilds/PetPhrase/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d6?logo=windows)](https://github.com/chengbuilds/PetPhrase/releases/latest)
 [![Built with Slint](https://img.shields.io/badge/built%20with-Rust%20%2B%20Slint-orange?logo=rust)](https://slint.dev/)
-[![Last Commit](https://img.shields.io/github/last-commit/wangcheng6-ai/PetPhrase?color=green)](https://github.com/wangcheng6-ai/PetPhrase/commits/main)
-[![License](https://img.shields.io/github/license/wangcheng6-ai/PetPhrase?color=success)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/wangcheng6-ai/PetPhrase?style=social)](https://github.com/wangcheng6-ai/PetPhrase/stargazers)
+[![Last Commit](https://img.shields.io/github/last-commit/chengbuilds/PetPhrase?color=green)](https://github.com/chengbuilds/PetPhrase/commits/main)
+[![License](https://img.shields.io/github/license/chengbuilds/PetPhrase?color=success)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/chengbuilds/PetPhrase?style=social)](https://github.com/chengbuilds/PetPhrase/stargazers)
 
 **单进程原生应用:安装包不到 10MB · 常驻内存约为 WebView 同类方案的 1/10 · 冷启动秒开**
 
@@ -31,7 +31,7 @@
 
 ## 🚀 快速上手
 
-1. 从 [Releases](https://github.com/wangcheng6-ai/PetPhrase/releases/latest) 下载 `PetPhrase_x.y.z_x64-setup.exe`,双击安装(装到用户目录,**无需管理员权限**)
+1. 从 [Releases](https://github.com/chengbuilds/PetPhrase/releases/latest) 下载 `PetPhrase_x.y.z_x64-setup.exe`,双击安装(装到用户目录,**无需管理员权限**)
 
    > ⚠️ **首次运行会出现 Windows 风险提示**:安装包未购买代码签名证书,SmartScreen 会弹「Windows 已保护你的电脑」。点 **「更多信息」→「仍要运行」** 即可。代码全部开源,安装包由本仓库源码构建,可自行审计或[从源码构建](#-从源码构建)。
 2. 桌面右下角出现一只桌宠——**点击它**,弹出常用语面板
@@ -93,7 +93,7 @@ npx petdex@latest install doraemon
 
 **目前仅支持 Windows 10/11 x64**,暂无 macOS / Linux 版本。
 
-好消息是:UI 框架 [Slint](https://slint.dev/) 本身跨平台,核心逻辑(存储/布局/动画)与平台无关,移植的主要工作量在窗口特效(亚克力/点击穿透)、托盘、开机自启的平台适配。**欢迎 macOS / Linux 用户提 PR!** 提前开 [Issue](https://github.com/wangcheng6-ai/PetPhrase/issues) 讨论方案更好。
+好消息是:UI 框架 [Slint](https://slint.dev/) 本身跨平台,核心逻辑(存储/布局/动画)与平台无关,移植的主要工作量在窗口特效(亚克力/点击穿透)、托盘、开机自启的平台适配。**欢迎 macOS / Linux 用户提 PR!** 提前开 [Issue](https://github.com/chengbuilds/PetPhrase/issues) 讨论方案更好。
 
 ## 🔧 从源码构建
 
@@ -111,7 +111,7 @@ makensis installer.nsi    # 产出 target/PetPhrase_<版本>_x64-setup.exe
 
 ## 🤝 贡献
 
-- 🐛 **报 Bug / 提需求**:[Issues](https://github.com/wangcheng6-ai/PetPhrase/issues) 欢迎任何反馈,中文英文都行
+- 🐛 **报 Bug / 提需求**:[Issues](https://github.com/chengbuilds/PetPhrase/issues) 欢迎任何反馈,中文英文都行
 - 🔀 **提 PR**:改动前跑一遍 `cargo test`;涉及 UI 手感的改动建议附截图/录屏
 - 🍎🐧 **平台移植**:macOS / Linux 适配是最受欢迎的贡献方向
 - ⭐ **觉得好用?** 点个 Star 是最直接的支持
@@ -123,4 +123,4 @@ makensis installer.nsi    # 产出 target/PetPhrase_<版本>_x64-setup.exe
 
 ## 📄 许可
 
-[MIT](LICENSE) © 2026 wangcheng6-ai
+[MIT](LICENSE) © 2026 chengbuilds
