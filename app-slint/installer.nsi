@@ -4,7 +4,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !define APP_NAME "PetPhrase"
-!define APP_VERSION "0.6.0"
+!define APP_VERSION "0.6.1"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
 Name "${APP_NAME}"

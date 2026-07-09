@@ -94,8 +94,16 @@ fn run_curl(args: &[&str]) -> Result<String, String> {
 
 /// 查最新 release 并与当前版本比对;Ok(None) = 已是最新
 pub fn fetch_latest(current: &str) -> Result<Option<Update>, String> {
-    // -I 只拿响应头,不跟随跳转;GitHub 对 releases/latest 回 302 → Location 含 tag
-    let headers = run_curl(&["-I", "--max-time", CHECK_TIMEOUT_SECS, RELEASES_LATEST_URL])?;
+    // -I 只拿响应头;GitHub 对 releases/latest 回 302 → Location 含 tag。
+    // -L 跟随跳转链并输出每一跳的头:仓库改名/迁移会先插一跳 301(Location 不含 /tag/),
+    // 不跟随就取不到 tag——2026-07 用户名改名把线上 0.6.0 的更新检查打断过,教训。
+    let headers = run_curl(&[
+        "-I",
+        "-L",
+        "--max-time",
+        CHECK_TIMEOUT_SECS,
+        RELEASES_LATEST_URL,
+    ])?;
     let tag = parse_redirect_tag(&headers).ok_or("响应里没有版本信息")?;
     Ok(update_from_tag(&tag, current))
 }
@@ -184,6 +192,19 @@ mod tests {
             None,
             "Location 不含 /tag/ 视为解析失败"
         );
+    }
+
+    #[test]
+    fn redirect_tag_survives_rename_hop() {
+        // curl -I -L 输出每一跳的头:仓库改名先回 301(Location 指向新仓库 latest,无 /tag/),
+        // 再 302 到 tag 页。解析必须跳过第一跳、取到第二跳的 tag。
+        let headers = "HTTP/1.1 301 Moved Permanently\r\n\
+                       Location: https://github.com/chengbuilds/PetPhrase/releases/latest\r\n\
+                       \r\n\
+                       HTTP/1.1 302 Found\r\n\
+                       Location: https://github.com/chengbuilds/PetPhrase/releases/tag/v0.6.1\r\n\
+                       Content-Length: 0\r\n";
+        assert_eq!(parse_redirect_tag(headers).as_deref(), Some("v0.6.1"));
     }
 
     #[test]
