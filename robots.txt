@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://wangcheng6-ai.github.io/PetPhrase/sitemap.xml
+Sitemap: https://chengbuilds.github.io/PetPhrase/sitemap.xml
