@@ -4,6 +4,51 @@ import {
     PrimaryButton, GhostButton, InputArea, SegmentedPair, SegmentedRow, ToggleSwitch
 } from "common.slint";
 
+/// 宠物卡(网格内复用;err 非空 = 不可选,半透明展示错误)
+component PetCard inherits Rectangle {
+    in property <PetCardUi> pet;
+    callback clicked;
+    width: 118px;
+    height: 132px;
+    border-radius: 12px;
+    border-width: 2px;
+    border-color: pet.selected ? Theme.accent : (pet-ta.has-hover && pet.err == "" ? #cbd5e1 : #e2e8f0);
+    background: pet.selected ? #fff7ed : #ffffff;
+    opacity: pet.err != "" ? 0.55 : 1.0;
+    VerticalLayout {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+        // thumb 已是 Rust 侧预裁好的单帧,无需 source-clip
+        if pet.err == "": Image {
+            source: pet.thumb;
+            width: 72px;
+            height: 78px;
+            image-fit: contain;
+        }
+        Text {
+            text: pet.name;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            color: Theme.text-primary;
+            overflow: elide;
+        }
+        if pet.err != "": Text {
+            text: pet.err;
+            font-size: 10.5px;
+            color: Theme.danger;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+    pet-ta := TouchArea {
+        enabled: pet.err == "";
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 export component SettingsWindow inherits Window {
     in property <[GroupRowUi]> groups;
     in property <[PhraseRowUi]> phrases;
@@ -16,10 +61,19 @@ export component SettingsWindow inherits Window {
     in-out property <bool> autostart-on;
     in property <string> custom-dir;
     in property <string> data-msg;
+    // 错误消息红色高亮(导入失败/保存失败等),普通消息保持灰
+    in property <bool> data-msg-error;
+    // 面板按使用频率排序
+    in-out property <bool> sort-by-use;
+    callback sort-toggled(bool);
+    // 单槽删除撤销(短语),8s 内有效
+    in property <bool> can-undo;
+    callback undo-delete;
 
     // 关于与更新
     in property <string> app-version;
     in property <string> update-msg;
+    in property <bool> update-msg-error;
     in property <bool> update-available;
     in property <bool> update-busy;
     in-out property <bool> auto-check-on;
@@ -27,10 +81,12 @@ export component SettingsWindow inherits Window {
     callback do-update;
     callback auto-check-toggled(bool);
 
-    // 确认框
+    // 确认框(泛化:kind 0=危险删除 1=导入替换,动作文案随场景)
     in-out property <bool> confirm-visible: false;
     in property <string> confirm-title;
     in property <string> confirm-msg;
+    in property <int> confirm-kind: 0;
+    in property <string> confirm-action-label: "删除";
     callback confirm-ok;
 
     callback group-selected(int);
@@ -309,6 +365,10 @@ export component SettingsWindow inherits Window {
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            if root.can-undo: GhostButton {
+                                text: "撤销删除";
+                                clicked => { root.undo-delete(); }
+                            }
                             if root.has-group: GhostButton {
                                 text: "删除分组";
                                 danger: true;
@@ -547,56 +607,29 @@ export component SettingsWindow inherits Window {
                     wrap: word-wrap;
                 }
 
-                HorizontalLayout {
+                // 宠物多行网格:每行 5 张(780 窗宽 - 48 padding 下第 6 张会截断)
+                VerticalLayout {
                     spacing: 10px;
-                    alignment: start;
-                    for pet[i] in root.pets: Rectangle {
-                        width: 118px;
-                        height: 132px;
-                        border-radius: 12px;
-                        border-width: 2px;
-                        border-color: pet.selected ? Theme.accent : (pet-ta.has-hover && pet.err == "" ? #cbd5e1 : #e2e8f0);
-                        background: pet.selected ? #fff7ed : #ffffff;
-                        opacity: pet.err != "" ? 0.55 : 1.0;
-                        VerticalLayout {
-                            padding: 8px;
-                            spacing: 4px;
-                            alignment: center;
-                            // thumb 已是 Rust 侧预裁好的单帧,无需 source-clip
-                            if pet.err == "": Image {
-                                source: pet.thumb;
-                                width: 72px;
-                                height: 78px;
-                                image-fit: contain;
-                            }
-                            Text {
-                                text: pet.name;
-                                font-size: 12px;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                                color: Theme.text-primary;
-                                overflow: elide;
-                            }
-                            if pet.err != "": Text {
-                                text: pet.err;
-                                font-size: 10.5px;
-                                color: Theme.danger;
-                                horizontal-alignment: center;
-                                wrap: word-wrap;
-                            }
-                        }
-                        pet-ta := TouchArea {
-                            enabled: pet.err == "";
-                            mouse-cursor: pointer;
-                            clicked => { root.pet-selected(i); }
+                    for rowidx in Math.ceil(root.pets.length / 5): HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        for colidx in Math.min(5, root.pets.length - rowidx * 5): PetCard {
+                            pet: root.pets[rowidx * 5 + colidx];
+                            clicked => { root.pet-selected(rowidx * 5 + colidx); }
                         }
                     }
                 }
                 HorizontalLayout {
                     spacing: 12px;
-                    alignment: start;
                     GhostButton { text: "选择自定义宠物目录…"; clicked => { root.pick-dir(); } }
-                    Text { text: root.custom-dir; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                    Text {
+                        text: root.custom-dir;
+                        font-size: 12px;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
                 }
 
                 Rectangle { height: 8px; }
@@ -630,6 +663,18 @@ export component SettingsWindow inherits Window {
                     }
                     Text { text: "开机自动启动"; vertical-alignment: center; color: Theme.text-secondary; }
                 }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 8px;
+                    ToggleSwitch {
+                        on: root.sort-by-use;
+                        toggled(v) => {
+                            root.sort-by-use = v;
+                            root.sort-toggled(v);
+                        }
+                    }
+                    Text { text: "面板按使用频率排序(常用的排前面)"; vertical-alignment: center; color: Theme.text-secondary; }
+                }
 
                 Rectangle { height: 8px; }
                 Text { text: "数据"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
@@ -638,7 +683,12 @@ export component SettingsWindow inherits Window {
                     alignment: start;
                     GhostButton { text: "导出常用语…"; icon: @image-url("icons/download.svg"); clicked => { root.do-export(); } }
                     GhostButton { text: "导入常用语…"; icon: @image-url("icons/upload.svg"); clicked => { root.do-import(); } }
-                    Text { text: root.data-msg; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                    Text {
+                        text: root.data-msg;
+                        font-size: 12px;
+                        color: root.data-msg-error ? Theme.danger : Theme.text-muted;
+                        vertical-alignment: center;
+                    }
                 }
 
                 Rectangle { height: 8px; }
@@ -662,7 +712,12 @@ export component SettingsWindow inherits Window {
                         enabled: !root.update-busy;
                         clicked => { root.do-update(); }
                     }
-                    Text { text: root.update-msg; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                    Text {
+                        text: root.update-msg;
+                        font-size: 12px;
+                        color: root.update-msg-error ? Theme.danger : Theme.text-muted;
+                        vertical-alignment: center;
+                    }
                 }
                 HorizontalLayout {
                     alignment: start;
@@ -686,7 +741,7 @@ export component SettingsWindow inherits Window {
         TouchArea { clicked => { root.confirm-visible = false; } }
         Rectangle {
             width: 320px;
-            height: 190px;
+            height: 200px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #ffffff;
@@ -704,10 +759,12 @@ export component SettingsWindow inherits Window {
                         width: 44px;
                         height: 44px;
                         border-radius: 22px;
-                        background: #fef2f2;
+                        background: root.confirm-kind == 1 ? #fff7ed : #fef2f2;
                         Image {
-                            source: @image-url("icons/trash-2.svg");
-                            colorize: Theme.danger;
+                            source: root.confirm-kind == 1
+                                ? @image-url("icons/upload.svg")
+                                : @image-url("icons/trash-2.svg");
+                            colorize: root.confirm-kind == 1 ? Theme.accent : Theme.danger;
                             width: 20px;
                             height: 20px;
                         }
@@ -738,9 +795,11 @@ export component SettingsWindow inherits Window {
                         width: 96px;
                         height: 34px;
                         border-radius: 8px;
-                        background: del-ta.has-hover ? #b91c1c : Theme.danger;
+                        background: del-ta.has-hover
+                            ? (root.confirm-kind == 1 ? #ea580c : #b91c1c)
+                            : (root.confirm-kind == 1 ? Theme.accent : Theme.danger);
                         animate background { duration: 150ms; }
-                        Text { text: "删除"; color: #ffffff; font-weight: 600; }
+                        Text { text: root.confirm-action-label; color: #ffffff; font-weight: 600; }
                         del-ta := TouchArea {
                             mouse-cursor: pointer;
                             clicked => {

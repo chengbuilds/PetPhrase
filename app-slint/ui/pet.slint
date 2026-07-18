@@ -5,6 +5,8 @@ export component PetWindow inherits Window {
     in property <int> frame-col;
     in property <int> frame-row;
     in property <float> pet-scale: 1.0;
+    // 无可用宠物素材:显示占位提示,点击改为打开设置(Rust 侧判断)
+    in property <bool> missing: false;
     callback pet-clicked;
     callback drag-start;
 
@@ -14,8 +16,10 @@ export component PetWindow inherits Window {
     width: 192px * pet-scale;
     height: 208px * pet-scale;
     title: "PetPhrase";
+    default-font-family: "Microsoft YaHei UI";
 
     img := Image {
+        visible: !root.missing;
         width: parent.width;
         height: parent.height;
         source: root.sheet;
@@ -24,6 +28,27 @@ export component PetWindow inherits Window {
         source-clip-y: root.frame-row * 208;
         source-clip-width: 192;
         source-clip-height: 208;
+    }
+
+    // 素材缺失占位:否则窗口全透明,用户以为程序没启动
+    if root.missing: Rectangle {
+        width: Math.min(parent.width - 8px, 176px);
+        height: 64px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: #ffffffe6;
+        border-width: 1px;
+        border-color: Theme.danger;
+        border-radius: 10px;
+        Text {
+            width: parent.width - 12px;
+            text: "宠物素材缺失\n点击打开设置选择宠物";
+            color: Theme.danger;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
     }
 
     // 拖拽后吞掉本次 click:系统拖窗接管后松手仍会触发 clicked

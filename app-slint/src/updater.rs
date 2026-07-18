@@ -18,7 +18,7 @@ pub struct Update {
     /// 不带 v 前缀,如 "0.6.0"
     pub version: String,
     pub setup_url: String,
-    /// 同名 .sha256 资产(发版脚本上传);拉取失败跳过校验(HTTPS + NSIS 自带 CRC 兜底)
+    /// 同名 .sha256 资产(发版流程强制上传);拉取失败即中止更新,不降级跳过
     pub sha256_url: String,
 }
 
@@ -137,17 +137,18 @@ pub fn sha256_of(path: &Path) -> Result<String, String> {
     parse_sha256(&text).ok_or_else(|| "certutil 输出无法解析".into())
 }
 
-/// 下载安装包;.sha256 拉得到就强校验,拉不到(老版本 release 没传)跳过
+/// 下载安装包并强制 sha256 校验:.sha256 拉不到或不匹配都中止。
+/// (0.6.0 起发版流程强制带 .sha256 资产,没有可跳过的历史包袱)
 pub fn download_and_verify(update: &Update) -> Result<std::path::PathBuf, String> {
     let dest = std::env::temp_dir().join(format!("PetPhrase_{}_x64-setup.exe", update.version));
     download(&update.setup_url, &dest)?;
-    if let Ok(text) = run_curl(&["-L", "--max-time", CHECK_TIMEOUT_SECS, &update.sha256_url]) {
-        let expected = parse_sha256(&text).ok_or("sha256 文件格式不正确")?;
-        let actual = sha256_of(&dest)?;
-        if actual != expected {
-            let _ = std::fs::remove_file(&dest);
-            return Err("安装包校验失败(sha256 不匹配)".into());
-        }
+    let text = run_curl(&["-L", "--max-time", CHECK_TIMEOUT_SECS, &update.sha256_url])
+        .map_err(|_| "无法获取校验文件(.sha256),已中止更新")?;
+    let expected = parse_sha256(&text).ok_or("sha256 文件格式不正确")?;
+    let actual = sha256_of(&dest)?;
+    if actual != expected {
+        let _ = std::fs::remove_file(&dest);
+        return Err("安装包校验失败(sha256 不匹配)".into());
     }
     Ok(dest)
 }

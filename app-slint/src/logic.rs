@@ -118,13 +118,20 @@ impl Ctx {
     }
 }
 
-/// 当前分组的混排布局(连续短句成气泡流,长句独占卡片)
-pub fn layout_group(data: &PhraseData, group_idx: usize, avail_w: f32) -> Vec<LaidItem> {
+/// 当前分组的混排布局(连续短句成气泡流,长句独占卡片)。
+/// by_use = 按 use_count 降序展示(稳定排序,同频保持手动序);phrase_idx 始终指向原始下标,
+/// 编辑/删除回源数据不受展示顺序影响。
+pub fn layout_group(data: &PhraseData, group_idx: usize, avail_w: f32, by_use: bool) -> Vec<LaidItem> {
     let mut ctx = Ctx::new(avail_w);
     let Some(group) = data.groups.get(group_idx) else {
         return ctx.items;
     };
-    for (pi, p) in group.phrases.iter().enumerate() {
+    let mut order: Vec<usize> = (0..group.phrases.len()).collect();
+    if by_use {
+        order.sort_by_key(|&i| std::cmp::Reverse(group.phrases[i].use_count));
+    }
+    for pi in order {
+        let p = &group.phrases[pi];
         if is_short(&p.text) {
             ctx.push_chip(group_idx, pi, &p.text);
         } else {
@@ -207,10 +214,10 @@ mod tests {
                 name: "工作".into(),
                 icon: None,
                 phrases: vec![
-                    Phrase { id: "a".into(), text: "收到".into() },
-                    Phrase { id: "b".into(), text: "好的没问题".into() },
-                    Phrase { id: "c".into(), text: "这是一条相当长的常用语,会被排成卡片并且可能被截断显示,超过两行的部分省略,再补充一些字数确保估宽后稳定超过两行的高度。".into() },
-                    Phrase { id: "d".into(), text: "辛苦了".into() },
+                    Phrase::new("a".into(), "收到".into()),
+                    Phrase::new("b".into(), "好的没问题".into()),
+                    Phrase::new("c".into(), "这是一条相当长的常用语,会被排成卡片并且可能被截断显示,超过两行的部分省略,再补充一些字数确保估宽后稳定超过两行的高度。".into()),
+                    Phrase::new("d".into(), "辛苦了".into()),
                 ],
             }],
         }
@@ -225,7 +232,7 @@ mod tests {
 
     #[test]
     fn chips_flow_then_card_breaks_row() {
-        let items = layout_group(&data(), 0, 280.0);
+        let items = layout_group(&data(), 0, 280.0, false);
         assert_eq!(items.len(), 4);
         // 前两条 chip 同行
         assert!(items[0].is_chip && items[1].is_chip);
@@ -245,17 +252,31 @@ mod tests {
     fn chip_wraps_when_row_full() {
         let mut d = data();
         d.groups[0].phrases = (0..8)
-            .map(|i| Phrase {
-                id: i.to_string(),
-                text: "八字长度短句啊".into(),
-            })
+            .map(|i| Phrase::new(i.to_string(), "八字长度短句啊".into()))
             .collect();
-        let items = layout_group(&d, 0, 280.0);
+        let items = layout_group(&d, 0, 280.0, false);
         let rows: std::collections::BTreeSet<i32> = items.iter().map(|i| i.y as i32).collect();
         assert!(rows.len() >= 2, "应换行,实际 rows={rows:?}");
         for it in &items {
             assert!(it.x + it.w <= 280.0 + 0.01);
         }
+    }
+
+    #[test]
+    fn sort_by_use_reorders_display_but_keeps_source_idx() {
+        let mut d = data();
+        d.groups[0].phrases[3].use_count = 9; // "辛苦了" 最高频
+        d.groups[0].phrases[1].use_count = 5;
+        let items = layout_group(&d, 0, 280.0, true);
+        assert_eq!(items[0].text, "辛苦了");
+        assert_eq!(items[0].phrase_idx, 3, "phrase_idx 仍指原始下标");
+        assert_eq!(items[1].text, "好的没问题");
+        // 同频(0)保持手动序:收到 在 长卡片 前
+        assert_eq!(items[2].text, "收到");
+        assert_eq!(items[2].phrase_idx, 0);
+        // 关闭排序 = 手动序不变
+        let manual = layout_group(&d, 0, 280.0, false);
+        assert_eq!(manual[0].phrase_idx, 0);
     }
 
     #[test]

@@ -73,6 +73,15 @@ export component PanelWindow inherits Window {
     // 保存失败横幅文本(Rust 灌入,空 = 无错误;保存成功自动清,点横幅手动关)
     in-out property <string> save-error;
 
+    // 删除撤销:横幅带按钮,Rust 起 8s 定时自动收
+    in-out property <bool> undo-open: false;
+    callback undo-clicked;
+
+    // 滚动归零:切分组/重开面板/搜索时由 Rust 调,免得新列表从上次滚动位置开始
+    public function reset-scroll() {
+        list-flick.viewport-y = 0;
+    }
+
     no-frame: true;
     always-on-top: true;
     background: transparent;
@@ -309,7 +318,7 @@ export component PanelWindow inherits Window {
                             y: 40px;
                             width: parent.width;
                             horizontal-alignment: center;
-                            text: root.search-text == "" ? "这个分组还没有常用语\n点右上角 ⚙ 去添加" : "没有匹配的常用语";
+                            text: root.search-text == "" ? "这个分组还没有常用语\n右键空白处添加,或点右上角 ⚙" : "没有匹配的常用语";
                             color: Theme.text-muted;
                             font-size: 12px;
                         }
@@ -516,5 +525,50 @@ export component PanelWindow inherits Window {
                 clicked => { root.save-error = ""; }
             }
         }
+
+        // ---- 删除撤销横幅(与保存失败横幅同槽位,错开堆叠) ----
+        if root.undo-open: Rectangle {
+            x: 12px;
+            y: root.height - 42px - (root.save-error != "" ? 38px : 0px);
+            width: root.width - 24px;
+            height: 32px;
+            border-radius: 8px;
+            background: Theme.surface-sheet;
+            border-width: 1px;
+            border-color: Theme.border-soft;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #0f172a24;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 6px;
+                spacing: 6px;
+                Text {
+                    text: "已删除 1 条常用语";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Rectangle {
+                    width: 44px;
+                    height: 22px;
+                    y: 5px;
+                    border-radius: 6px;
+                    background: undo-ta.has-hover ? Theme.accent-soft : transparent;
+                    Text {
+                        text: "撤销";
+                        color: Theme.accent;
+                        font-size: 11.5px;
+                        font-weight: 600;
+                    }
+                    undo-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.undo-clicked(); }
+                    }
+                }
+            }
+        }
+
     }
 }

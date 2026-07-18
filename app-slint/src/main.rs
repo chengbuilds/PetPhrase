@@ -60,6 +60,12 @@ fn data_dir() -> PathBuf {
     .clone()
 }
 
+/// 设置窗「数据」区消息统一入口:错误红色高亮,普通消息灰色
+fn set_data_msg(app: &Rc<App>, msg: &str, is_err: bool) {
+    app.settings_win.set_data_msg(msg.into());
+    app.settings_win.set_data_msg_error(is_err);
+}
+
 /// 保存失败双通道提示:设置窗「数据」区 + 面板红色横幅(面板内编辑时设置窗常不可见)。
 /// 磁盘故障是全局条件,任一保存成功即视为恢复,顺手清面板横幅。
 fn report_persist(app: &Rc<App>, result: std::io::Result<()>, what: &str) {
@@ -68,12 +74,12 @@ fn report_persist(app: &Rc<App>, result: std::io::Result<()>, what: &str) {
             app.panel.set_save_error("".into());
             // 恢复后清设置窗残留的保存失败提示;按内容判断,别误伤「已导出 ✓」等其他消息
             if app.settings_win.get_data_msg().contains("保存失败") {
-                app.settings_win.set_data_msg("".into());
+                set_data_msg(app, "", false);
             }
         }
         Err(e) => {
             let msg = format!("⚠ {what}保存失败:{e}");
-            app.settings_win.set_data_msg(msg.clone().into());
+            set_data_msg(app, &msg, true);
             app.panel.set_save_error(msg.into());
         }
     }
@@ -122,6 +128,13 @@ fn pet_roots(custom: &Option<String>) -> Vec<PathBuf> {
     roots
 }
 
+/// 设置窗确认框待执行动作(泛化:同一个框服务多种危险操作)
+enum ConfirmAction {
+    DeleteGroup,
+    /// 已读入并校验通过的导入数据,确认后快照+覆盖
+    ImportReplace(storage::PhraseData),
+}
+
 struct State {
     data: storage::PhraseData,
     settings: storage::Settings,
@@ -144,6 +157,13 @@ struct State {
     update_busy: bool,
     /// 托盘「检查更新」项句柄,发现新版后改文案
     update_menu: Option<tray_icon::menu::MenuItem>,
+    /// 确认框按下「确认」后要执行的动作
+    confirm_action: Option<ConfirmAction>,
+    /// 单槽删除撤销:(分组下标, 原短语下标, 短语)
+    last_deleted: Option<(usize, usize, storage::Phrase)>,
+    /// 闲时动画:idle 帧计数与下次彩蛋触发阈值
+    idle_ticks: i32,
+    next_special: i32,
 }
 
 struct App {
@@ -154,6 +174,7 @@ struct App {
     hide_timer: slint::Timer,
     move_timer: slint::Timer,
     update_timer: slint::Timer,
+    undo_timer: slint::Timer,
 }
 
 // 后台线程结果经 invoke_from_event_loop 回主线程时取 App:
@@ -170,11 +191,44 @@ fn with_app(f: impl FnOnce(&Rc<App>)) {
     });
 }
 
+/// 二实例唤醒信号文件:第二实例写入后退出,主实例托盘轮询发现即找回桌宠
+fn wake_signal_path() -> PathBuf {
+    data_dir().join("wake.signal")
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance = single_instance::SingleInstance::new("petphrase-slint")?;
     if !instance.is_single() {
+        // 不再静默退出:通知主实例把桌宠找回来,用户双击图标必须有反应
+        let _ = std::fs::write(wake_signal_path(), b"wake");
         return Ok(());
     }
+    let _ = std::fs::remove_file(wake_signal_path()); // 清残留信号,防启动即误触发
+
+    // 崩溃留痕:release 无控制台,没有日志就只能靠用户口述「用着用着没了」
+    std::panic::set_hook(Box::new(|info| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let log = data_dir().join("crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[unix {ts}] v{} {info}", updater::CURRENT_VERSION);
+        }
+        rfd::MessageDialog::new()
+            .set_title("PetPhrase 遇到错误")
+            .set_description(format!(
+                "程序发生内部错误,已记录日志:\n{}\n重新启动即可继续使用。",
+                log.display()
+            ))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }));
 
     // 软件渲染:实测常驻 ~15MB(GPU 渲染 ~78MB),雪碧图 6fps 动画绰绰有余
     slint::BackendSelector::new()
@@ -218,10 +272,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             update: None,
             update_busy: false,
             update_menu: None,
+            confirm_action: None,
+            last_deleted: None,
+            idle_ticks: 0,
+            next_special: rand_ticks(),
         }),
         hide_timer: slint::Timer::default(),
         move_timer: slint::Timer::default(),
         update_timer: slint::Timer::default(),
+        undo_timer: slint::Timer::default(),
     });
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -235,7 +294,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_frame_timer(&app);
     let _tray = setup_tray(&app)?;
 
-    // 启动 10s 后静默检查一次更新(开关存 settings,失败静默)
+    // 启动 10s 后静默检查一次更新;此后每 24h 重查一次
+    // (开机自启用户一挂数周,只查启动那一次等于永远不查)
     {
         let a = app.clone();
         app.update_timer.start(
@@ -245,6 +305,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if a.state.borrow().settings.auto_check_update {
                     start_update_check(&a, false);
                 }
+                let a2 = a.clone();
+                a.update_timer.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_secs(24 * 3600),
+                    move || {
+                        if a2.state.borrow().settings.auto_check_update {
+                            start_update_check(&a2, false);
+                        }
+                    },
+                );
             },
         );
     }
@@ -269,7 +339,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     app.pet.show()?;
-    // 落位 + 原生属性(跳任务栏)
+    // 落位 + 原生属性(跳任务栏);恢复坐标后钳制到可见显示器,
+    // 换显示器/改缩放留下的屏外坐标会让宠永远找不到
     {
         let st = app.state.borrow();
         if let Some((x, y)) = st.settings.pet_pos {
@@ -278,6 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_position(slint::PhysicalPosition::new(x, y));
         }
     }
+    clamp_pet_to_screen(&app);
     app.pet
         .window()
         .with_winit_window(|w: &winit::window::Window| {
@@ -297,10 +369,70 @@ fn set_theme(app: &Rc<App>, solid: bool) {
 
 /* ================= 宠物窗 ================= */
 
+/// 闲时彩蛋间隔:90~330 帧(FRAME_MS≈183ms → 约 16~60 秒),纳秒时钟当随机源免拉依赖
+fn rand_ticks() -> i32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    90 + (nanos % 241) as i32
+}
+
+/// 宠窗中心不在任何显示器内 → 挪回主显示器右下角(留出任务栏与边距)
+fn clamp_pet_to_screen(app: &Rc<App>) {
+    app.pet
+        .window()
+        .with_winit_window(|w: &winit::window::Window| {
+            let pos = w.outer_position().unwrap_or_default();
+            let size = w.outer_size();
+            let cx = pos.x + size.width as i32 / 2;
+            let cy = pos.y + size.height as i32 / 2;
+            let visible = w.available_monitors().any(|m| {
+                let mp = m.position();
+                let ms = m.size();
+                cx >= mp.x
+                    && cx < mp.x + ms.width as i32
+                    && cy >= mp.y
+                    && cy < mp.y + ms.height as i32
+            });
+            if visible {
+                return;
+            }
+            if let Some(m) = w.primary_monitor().or_else(|| w.available_monitors().next()) {
+                let mp = m.position();
+                let ms = m.size();
+                let nx = (mp.x + ms.width as i32 - size.width as i32 - 80).max(mp.x);
+                let ny = (mp.y + ms.height as i32 - size.height as i32 - 120).max(mp.y);
+                w.set_outer_position(winit::dpi::PhysicalPosition::new(nx, ny));
+            }
+        });
+}
+
+/// 重新压回置顶带顶端:后创建的 topmost 窗口会盖住宠,重显示时重申一次。
+/// (独占全屏与 UAC 安全桌面无解,属系统语义;不做定时抢前台)
+fn assert_topmost(win: &slint::Window) {
+    win.with_winit_window(|w: &winit::window::Window| {
+        w.set_window_level(winit::window::WindowLevel::Normal);
+        w.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+    });
+}
+
+/// 托盘找回/二实例唤醒共用:显示、钳回屏内、重申置顶、挥手打招呼
+fn recover_pet(app: &Rc<App>) {
+    let _ = app.pet.show();
+    clamp_pet_to_screen(app);
+    assert_topmost(app.pet.window());
+    app.state.borrow_mut().animator.play(PetState::Wave, true);
+}
+
 fn wire_pet(app: &Rc<App>) {
     let a = app.clone();
     app.pet.on_pet_clicked(move || {
         dbg_log("pet clicked");
+        if a.pet.get_missing() {
+            open_settings(&a); // 素材缺失:点占位提示直达设置选宠
+            return;
+        }
         a.state.borrow_mut().animator.play(PetState::Wave, true);
         toggle_panel(&a);
     });
@@ -340,28 +472,39 @@ fn wire_pet(app: &Rc<App>) {
     });
 }
 
+/// 解码雪碧图并推算网格;失败(文件损坏/非图片)返回 None
+fn try_load_sheet(path: &str) -> Option<(slint::Image, i32, i32)> {
+    let img = slint::Image::load_from_path(std::path::Path::new(path)).ok()?;
+    let size = img.size();
+    let (rows, cols) = anim::grid_from_image(size.width, size.height);
+    Some((img, rows, cols))
+}
+
+/// 选中宠优先,解码失败依次回退其它可用宠;全部失败显示缺失占位
+/// (不显示占位的话窗口全透明还挡点击,用户以为程序没启动)
 fn refresh_pet_sprite(app: &Rc<App>) {
-    let (sheet_path, ok) = {
+    let candidates: Vec<String> = {
         let st = app.state.borrow();
-        let pet = st
+        let selected = st
             .pets
             .iter()
-            .find(|p| p.id == st.settings.pet_id && p.error.is_none())
-            .or_else(|| st.pets.iter().find(|p| p.error.is_none()));
-        match pet {
-            Some(p) => (p.spritesheet.clone(), true),
-            None => (String::new(), false),
-        }
+            .find(|p| p.id == st.settings.pet_id && p.error.is_none());
+        selected
+            .into_iter()
+            .chain(st.pets.iter().filter(|p| p.error.is_none()))
+            .map(|p| p.spritesheet.clone())
+            .collect() // 选中宠在首位,可能重复一次,解码成功即返回无所谓
     };
-    if !ok {
-        return;
+    for path in &candidates {
+        if let Some((img, rows, cols)) = try_load_sheet(path) {
+            app.state.borrow_mut().animator = Animator::new(rows, cols);
+            app.pet.set_sheet(img);
+            app.pet.set_missing(false);
+            return;
+        }
     }
-    if let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&sheet_path)) {
-        let size = img.size();
-        let (rows, cols) = anim::grid_from_image(size.width, size.height);
-        app.state.borrow_mut().animator = Animator::new(rows, cols);
-        app.pet.set_sheet(img);
-    }
+    app.pet.set_missing(true);
+    app.pet.set_sheet(slint::Image::default());
 }
 
 /// 应用缩放并移窗,锚定底边中点——宠的「脚」原地不动。
@@ -385,7 +528,30 @@ fn setup_frame_timer(app: &Rc<App>) {
         slint::TimerMode::Repeated,
         Duration::from_millis(anim::FRAME_MS),
         move || {
-            let (row, col) = a.state.borrow_mut().animator.step();
+            // 宠隐藏时不空转(托盘隐藏后帧步进/属性刷新纯浪费)
+            if !a.pet.window().is_visible() {
+                return;
+            }
+            let (row, col) = {
+                let mut st = a.state.borrow_mut();
+                // 闲够一段随机时长播一个彩蛋动画(jump/run/review/failed),
+                // 雪碧图 6 行素材以前只用了 idle/wave 两行
+                if st.animator.is_idle() {
+                    st.idle_ticks += 1;
+                    if st.idle_ticks >= st.next_special {
+                        st.idle_ticks = 0;
+                        st.next_special = rand_ticks();
+                        let rows = st.animator.rows();
+                        let rand = st.next_special as u32; // 已是随机值,直接复用作挑选源
+                        if let Some(s) = anim::pick_special(rows, rand) {
+                            st.animator.play(s, true);
+                        }
+                    }
+                } else {
+                    st.idle_ticks = 0;
+                }
+                st.animator.step()
+            };
             a.pet.set_frame_row(row);
             a.pet.set_frame_col(col);
         },
@@ -401,7 +567,12 @@ fn refresh_panel(app: &Rc<App>) {
         let st = app.state.borrow();
         let query = app.panel.get_search_text().to_string();
         let items = if query.trim().is_empty() {
-            logic::layout_group(&st.data, st.active_group, LIST_AVAIL_W)
+            logic::layout_group(
+                &st.data,
+                st.active_group,
+                LIST_AVAIL_W,
+                st.settings.sort_by_use,
+            )
         } else {
             logic::layout_search(&st.data, &query, LIST_AVAIL_W)
         };
@@ -451,7 +622,10 @@ fn wire_panel(app: &Rc<App>) {
     });
 
     let a = app.clone();
-    app.panel.on_search_changed(move |_| refresh_panel(&a));
+    app.panel.on_search_changed(move |_| {
+        a.panel.invoke_reset_scroll(); // 结果集变了,滚动位置沿用会露空白
+        refresh_panel(&a);
+    });
 
     let a = app.clone();
     app.panel.on_item_clicked(move |i| copy_item(&a, i));
@@ -471,7 +645,8 @@ fn wire_panel(app: &Rc<App>) {
     // ---- 右键菜单动作(LaidItem 带 group_idx/phrase_idx 定位回源数据) ----
     let a = app.clone();
     app.panel.on_item_delete_requested(move |i| {
-        {
+        // 下标过期没删到东西就别弹撤销横幅,横幅不能说谎
+        let removed = {
             let mut st = a.state.borrow_mut();
             let Some((gi, pi)) = st
                 .items
@@ -480,18 +655,28 @@ fn wire_panel(app: &Rc<App>) {
             else {
                 return;
             };
-            if let Some(g) = st.data.groups.get_mut(gi) {
-                if pi < g.phrases.len() {
-                    g.phrases.remove(pi);
+            match st.data.groups.get_mut(gi) {
+                Some(g) if pi < g.phrases.len() => {
+                    let p = g.phrases.remove(pi);
+                    st.last_deleted = Some((gi, pi, p));
+                    true
                 }
+                _ => false,
             }
+        };
+        if !removed {
+            return;
         }
+        offer_undo(&a);
         persist_data(&a);
         refresh_panel(&a);
         if a.settings_win.window().is_visible() {
             refresh_settings(&a);
         }
     });
+
+    let a = app.clone();
+    app.panel.on_undo_clicked(move || undo_delete(&a));
 
     // 编辑/添加:面板内就地编辑器,不跳设置窗
     let a = app.clone();
@@ -537,6 +722,13 @@ fn wire_panel(app: &Rc<App>) {
         if text.is_empty() {
             return;
         }
+        // 与导入同一套上限:导入拒 1 万字,应用内添加没理由放行
+        if text.chars().count() > storage::MAX_TEXT_CHARS {
+            a.panel.set_save_error(
+                format!("⚠ 内容过长(上限 {} 字),未保存", storage::MAX_TEXT_CHARS).into(),
+            );
+            return;
+        }
         let Some((gi, target)) = a.state.borrow_mut().pending_edit.take() else {
             return;
         };
@@ -551,7 +743,13 @@ fn wire_panel(app: &Rc<App>) {
                         p.text = text;
                     }
                 }
-                None => g.phrases.push(storage::Phrase { id: uid(), text }),
+                None => {
+                    if g.phrases.len() >= storage::MAX_PHRASES_PER_GROUP {
+                        a.panel.set_save_error("⚠ 该分组短语已达上限".into());
+                        return;
+                    }
+                    g.phrases.push(storage::Phrase::new(uid(), text));
+                }
             }
         }
         persist_data(&a);
@@ -581,17 +779,25 @@ fn wire_panel(app: &Rc<App>) {
     });
 }
 
-fn select_group(app: &Rc<App>, idx: usize) {
+/// active_group 与 settings.last_group 是同一事实的两份存储,
+/// 必须只经此处同步更新(新建/删除/拖拽分组以前各改各的,重启后回不到预期分组)
+fn set_active_group(app: &Rc<App>, idx: usize) {
     {
         let mut st = app.state.borrow_mut();
-        if idx >= st.data.groups.len() {
-            return;
-        }
+        let idx = idx.min(st.data.groups.len().saturating_sub(1));
         st.active_group = idx;
-        st.settings.last_group = Some(st.data.groups[idx].id.clone());
+        st.settings.last_group = st.data.groups.get(idx).map(|g| g.id.clone());
     }
     persist_settings(app);
+}
+
+fn select_group(app: &Rc<App>, idx: usize) {
+    if idx >= app.state.borrow().data.groups.len() {
+        return;
+    }
+    set_active_group(app, idx);
     app.panel.set_search_text("".into());
+    app.panel.invoke_reset_scroll();
     refresh_panel(app);
     // 设置窗可见才刷:refresh_settings 会为缺缓存的宠解码整张雪碧图(~11.5MB/宠)做缩略图,
     // 面板点 Tab 不该触发,缩略图只在设置窗打开期间常驻
@@ -601,18 +807,43 @@ fn select_group(app: &Rc<App>, idx: usize) {
 }
 
 fn copy_item(app: &Rc<App>, i: i32) {
-    let text = match app.state.borrow().items.get(i as usize) {
-        Some(it) => it.text.clone(),
+    let (text, gi, pi) = match app.state.borrow().items.get(i as usize) {
+        Some(it) => (it.text.clone(), it.group_idx, it.phrase_idx),
         None => return,
     };
+    // 剪贴板句柄可能已失效(或启动时就没拿到):失败先重建再试一次,
+    // 否则启动那一下失败就整个会话永远复制不了
     let ok = {
         let mut st = app.state.borrow_mut();
-        match st.clipboard.as_mut() {
-            Some(cb) => cb.set_text(text).is_ok(),
-            None => false,
+        let mut done = false;
+        for retry in 0..2 {
+            done = match st.clipboard.as_mut() {
+                Some(cb) => cb.set_text(text.clone()).is_ok(),
+                None => false,
+            };
+            if done {
+                break;
+            }
+            if retry == 0 {
+                st.clipboard = arboard::Clipboard::new().ok();
+            }
         }
+        done
     };
     if ok {
+        // 计数走 (group_idx, phrase_idx) 回源,搜索/频率排序下标不影响归属
+        {
+            let mut st = app.state.borrow_mut();
+            if let Some(p) = st
+                .data
+                .groups
+                .get_mut(gi)
+                .and_then(|g| g.phrases.get_mut(pi))
+            {
+                p.use_count = p.use_count.saturating_add(1);
+            }
+        }
+        persist_data(app); // 只落盘不刷面板:排序开着也不能在点击瞬间重排列表
         app.panel.set_copied_idx(i);
         app.state.borrow_mut().animator.play(PetState::Wave, true);
         let a = app.clone();
@@ -632,7 +863,76 @@ fn copy_item(app: &Rc<App>, i: i32) {
         }
     } else {
         app.panel.set_failed_idx(i);
+        app.panel
+            .set_save_error("⚠ 复制失败,请重试(剪贴板被其它程序占用)".into());
     }
+}
+
+/// 删除后开 8s 撤销窗口:面板横幅 + 设置页按钮双入口,超时自动收(单槽,新删除顶旧)
+fn offer_undo(app: &Rc<App>) {
+    app.panel.set_undo_open(true);
+    app.settings_win.set_can_undo(true);
+    let a = app.clone();
+    app.undo_timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_secs(8),
+        move || clear_undo(&a),
+    );
+}
+
+fn clear_undo(app: &Rc<App>) {
+    app.state.borrow_mut().last_deleted = None;
+    app.panel.set_undo_open(false);
+    app.settings_win.set_can_undo(false);
+}
+
+/// 撤销期间数据可能又变过:分组/下标钳制后插回,宁可位置偏一点也不丢内容
+fn undo_delete(app: &Rc<App>) {
+    let restored = {
+        let mut st = app.state.borrow_mut();
+        match st.last_deleted.take() {
+            Some((gi, pi, p)) if !st.data.groups.is_empty() => {
+                let gi = gi.min(st.data.groups.len() - 1);
+                let g = &mut st.data.groups[gi];
+                let pi = pi.min(g.phrases.len());
+                g.phrases.insert(pi, p);
+                true
+            }
+            _ => false,
+        }
+    };
+    clear_undo(app);
+    if restored {
+        persist_data(app);
+        refresh_panel(app);
+        if app.settings_win.window().is_visible() {
+            refresh_settings(app);
+        }
+    }
+}
+
+/// 确认后的导入落地:先快照当前数据(失败即中止,不能拿用户数据赌),再整体替换
+fn apply_import(app: &Rc<App>, data: storage::PhraseData) {
+    let snap = {
+        let st = app.state.borrow();
+        storage::snapshot_before_import(&data_dir(), &st.data)
+    };
+    if let Err(e) = snap {
+        set_data_msg(app, &format!("⚠ 导入中止:备份当前数据失败({e})"), true);
+        return;
+    }
+    {
+        let mut st = app.state.borrow_mut();
+        st.data = data;
+        st.last_deleted = None; // 旧数据的撤销槽随之作废
+    }
+    clear_undo(app);
+    set_active_group(app, 0);
+    // 成功消息先写:persist 失败时 report_persist 的 ⚠ 会覆盖它,失败必须可见
+    set_data_msg(app, "已导入 ✓(原数据备份在 phrases.pre-import.json)", false);
+    persist_data(app);
+    refresh_settings(app);
+    refresh_panel(app);
 }
 
 fn ensure_panel_native(app: &Rc<App>) {
@@ -659,7 +959,8 @@ fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
     app.pet
         .window()
         .with_winit_window(|w: &winit::window::Window| {
-            let pos = w.outer_position().unwrap_or_default();
+            // 拿不到窗口坐标就别摆了,(0,0) 兜底会把面板甩到屏幕角落
+            let pos = w.outer_position().ok()?;
             let size = w.outer_size();
             let (mx, my, mw, mh) = match w.current_monitor() {
                 Some(m) => {
@@ -669,7 +970,7 @@ fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
                 }
                 None => (0.0, 0.0, 1920.0, 1080.0),
             };
-            logic::panel_position(
+            Some(logic::panel_position(
                 logic::Rect {
                     x: pos.x as f32,
                     y: pos.y as f32,
@@ -684,8 +985,9 @@ fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
                     w: mw,
                     h: mh,
                 },
-            )
+            ))
         })
+        .flatten()
 }
 
 fn toggle_panel(app: &Rc<App>) {
@@ -704,6 +1006,7 @@ fn show_panel(app: &Rc<App>) {
     app.state.borrow_mut().panel_got_focus = false;
 
     app.panel.set_search_text("".into());
+    app.panel.invoke_reset_scroll();
     refresh_panel(app);
     dbg_log(&format!(
         "show_panel: show at {},{}",
@@ -874,16 +1177,20 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_group_add(move || {
-        {
+        let new_idx = {
             let mut st = a.state.borrow_mut();
+            if st.data.groups.len() >= storage::MAX_GROUPS {
+                return;
+            }
             st.data.groups.push(storage::Group {
                 id: uid(),
                 name: "新分组".into(),
                 icon: Some("folder".into()),
                 phrases: Vec::new(),
             });
-            st.active_group = st.data.groups.len() - 1;
-        }
+            st.data.groups.len() - 1
+        };
+        set_active_group(&a, new_idx); // 同步 last_group,重启才能回到新建的分组
         persist_data(&a);
         refresh_settings(&a);
         refresh_panel(&a);
@@ -939,6 +1246,9 @@ fn wire_settings(app: &Rc<App>) {
                 None => return,
             }
         };
+        a.state.borrow_mut().confirm_action = Some(ConfirmAction::DeleteGroup);
+        a.settings_win.set_confirm_kind(0);
+        a.settings_win.set_confirm_action_label("删除".into());
         a.settings_win.set_confirm_title(title.into());
         a.settings_win.set_confirm_msg(msg.into());
         a.settings_win.set_confirm_visible(true);
@@ -946,22 +1256,29 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_confirm_ok(move || {
-        {
-            let mut st = a.state.borrow_mut();
-            let idx = st.active_group;
-            if idx < st.data.groups.len() {
-                st.data.groups.remove(idx);
+        let action = a.state.borrow_mut().confirm_action.take();
+        match action {
+            Some(ConfirmAction::DeleteGroup) => {
+                {
+                    let mut st = a.state.borrow_mut();
+                    let idx = st.active_group;
+                    if idx < st.data.groups.len() {
+                        st.data.groups.remove(idx);
+                    }
+                }
+                set_active_group(&a, 0);
+                persist_data(&a);
+                refresh_settings(&a);
+                refresh_panel(&a);
             }
-            st.active_group = 0;
+            Some(ConfirmAction::ImportReplace(data)) => apply_import(&a, data),
+            None => {}
         }
-        persist_data(&a);
-        refresh_settings(&a);
-        refresh_panel(&a);
     });
 
     let a = app.clone();
     app.settings_win.on_group_dropped(move |from, to| {
-        {
+        let to = {
             let mut st = a.state.borrow_mut();
             let len = st.data.groups.len() as i32;
             if len == 0 {
@@ -974,8 +1291,9 @@ fn wire_settings(app: &Rc<App>) {
             }
             let g = st.data.groups.remove(from);
             st.data.groups.insert(to, g);
-            st.active_group = to;
-        }
+            to
+        };
+        set_active_group(&a, to);
         persist_data(&a);
         refresh_settings(&a);
         refresh_panel(&a);
@@ -987,11 +1305,24 @@ fn wire_settings(app: &Rc<App>) {
         if text.is_empty() {
             return;
         }
+        if text.chars().count() > storage::MAX_TEXT_CHARS {
+            set_data_msg(
+                &a,
+                &format!("⚠ 内容过长(上限 {} 字),未添加", storage::MAX_TEXT_CHARS),
+                true,
+            );
+            return;
+        }
         {
             let mut st = a.state.borrow_mut();
             let idx = st.active_group;
             if let Some(g) = st.data.groups.get_mut(idx) {
-                g.phrases.push(storage::Phrase { id: uid(), text });
+                if g.phrases.len() >= storage::MAX_PHRASES_PER_GROUP {
+                    drop(st);
+                    set_data_msg(&a, "⚠ 该分组短语已达上限", true);
+                    return;
+                }
+                g.phrases.push(storage::Phrase::new(uid(), text));
             }
         }
         persist_data(&a);
@@ -1002,6 +1333,21 @@ fn wire_settings(app: &Rc<App>) {
     let a = app.clone();
     app.settings_win.on_phrase_edited(move |i, text| {
         let text = text.trim().to_string();
+        // 清空/超长以前被静默吞掉,用户以为改成功了
+        if text.is_empty() {
+            set_data_msg(&a, "⚠ 内容不能为空,未修改", true);
+            refresh_settings(&a);
+            return;
+        }
+        if text.chars().count() > storage::MAX_TEXT_CHARS {
+            set_data_msg(
+                &a,
+                &format!("⚠ 内容过长(上限 {} 字),未修改", storage::MAX_TEXT_CHARS),
+                true,
+            );
+            refresh_settings(&a);
+            return;
+        }
         {
             let mut st = a.state.borrow_mut();
             let idx = st.active_group;
@@ -1011,9 +1357,7 @@ fn wire_settings(app: &Rc<App>) {
                 .get_mut(idx)
                 .and_then(|g| g.phrases.get_mut(i as usize))
             {
-                if !text.is_empty() {
-                    p.text = text;
-                }
+                p.text = text;
             }
         }
         persist_data(&a);
@@ -1023,19 +1367,29 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_phrase_delete(move |i| {
-        {
+        let removed = {
             let mut st = a.state.borrow_mut();
             let idx = st.active_group;
-            if let Some(g) = st.data.groups.get_mut(idx) {
-                if (i as usize) < g.phrases.len() {
-                    g.phrases.remove(i as usize);
+            match st.data.groups.get_mut(idx) {
+                Some(g) if (i as usize) < g.phrases.len() => {
+                    let p = g.phrases.remove(i as usize);
+                    st.last_deleted = Some((idx, i as usize, p));
+                    true
                 }
+                _ => false,
             }
+        };
+        if !removed {
+            return;
         }
+        offer_undo(&a);
         persist_data(&a);
         refresh_settings(&a);
         refresh_panel(&a);
     });
+
+    let a = app.clone();
+    app.settings_win.on_undo_delete(move || undo_delete(&a));
 
     let a = app.clone();
     app.settings_win.on_phrase_dropped(move |from, to| {
@@ -1064,16 +1418,22 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_pet_selected(move |i| {
-        {
-            let mut st = a.state.borrow_mut();
+        // 扫描期只验文件存在;真解码成功才落选择,否则设置显示已换、桌面还是旧宠
+        let (id, sheet) = {
+            let st = a.state.borrow();
             let Some(p) = st.pets.get(i as usize) else {
                 return;
             };
             if p.error.is_some() {
                 return;
             }
-            st.settings.pet_id = p.id.clone();
+            (p.id.clone(), p.spritesheet.clone())
+        };
+        if try_load_sheet(&sheet).is_none() {
+            set_data_msg(&a, "⚠ 该宠物雪碧图无法解码(文件损坏?),已保留当前选择", true);
+            return;
         }
+        a.state.borrow_mut().settings.pet_id = id;
         persist_settings(&a);
         refresh_pet_sprite(&a);
         refresh_settings(&a);
@@ -1110,6 +1470,13 @@ fn wire_settings(app: &Rc<App>) {
     });
 
     let a = app.clone();
+    app.settings_win.on_sort_toggled(move |on| {
+        a.state.borrow_mut().settings.sort_by_use = on;
+        persist_settings(&a);
+        refresh_panel(&a);
+    });
+
+    let a = app.clone();
     app.settings_win.on_autostart_toggled(move |on| {
         let result = autostart_handle().and_then(|al| {
             if on {
@@ -1120,8 +1487,7 @@ fn wire_settings(app: &Rc<App>) {
         });
         if let Err(e) = result {
             a.settings_win.set_autostart_on(!on);
-            a.settings_win
-                .set_data_msg(format!("⚠ 开机自启设置失败:{e}").into());
+            set_data_msg(&a, &format!("⚠ 开机自启设置失败:{e}"), true);
         }
     });
 
@@ -1154,35 +1520,51 @@ fn wire_settings(app: &Rc<App>) {
                 let st = a.state.borrow();
                 storage::export_phrases(&st.data, &path)
             };
-            let msg = match result {
-                Ok(()) => "已导出 ✓".to_string(),
-                Err(e) => format!("导出失败:{e}"),
-            };
-            a.settings_win.set_data_msg(msg.into());
+            match result {
+                Ok(()) => set_data_msg(&a, "已导出 ✓", false),
+                Err(e) => set_data_msg(&a, &format!("⚠ 导出失败:{e}"), true),
+            }
         }
     });
 
+    // 导入 = 整体替换,走确认框:读入校验 → 显示替换规模 → 确认后快照+覆盖
     let a = app.clone();
     app.settings_win.on_do_import(move || {
-        if let Some(path) = rfd::FileDialog::new()
+        let Some(path) = rfd::FileDialog::new()
             .set_title("导入常用语")
             .add_filter("JSON", &["json"])
             .pick_file()
-        {
-            match storage::import_phrases(&data_dir(), &path) {
-                Ok(data) => {
-                    {
-                        let mut st = a.state.borrow_mut();
-                        st.data = data;
-                        st.active_group = 0;
-                    }
-                    a.settings_win.set_data_msg("已导入 ✓".into());
-                    refresh_settings(&a);
-                    refresh_panel(&a);
-                }
-                Err(e) => a.settings_win.set_data_msg(format!("导入失败:{e}").into()),
+        else {
+            return;
+        };
+        let data = match storage::read_import(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                set_data_msg(&a, &format!("⚠ 导入失败:{e}"), true);
+                return;
             }
-        }
+        };
+        let (cur_g, cur_p) = {
+            let st = a.state.borrow();
+            (
+                st.data.groups.len(),
+                st.data.groups.iter().map(|g| g.phrases.len()).sum::<usize>(),
+            )
+        };
+        let new_p: usize = data.groups.iter().map(|g| g.phrases.len()).sum();
+        let msg = format!(
+            "将用文件内容(共 {} 组 {} 条)替换当前全部常用语({} 组 {} 条)。\n当前数据会先备份为 phrases.pre-import.json。",
+            data.groups.len(),
+            new_p,
+            cur_g,
+            cur_p
+        );
+        a.state.borrow_mut().confirm_action = Some(ConfirmAction::ImportReplace(data));
+        a.settings_win.set_confirm_kind(1);
+        a.settings_win.set_confirm_action_label("替换导入".into());
+        a.settings_win.set_confirm_title("导入并替换".into());
+        a.settings_win.set_confirm_msg(msg.into());
+        a.settings_win.set_confirm_visible(true);
     });
 
     // ---- 关于与更新 ----
@@ -1190,6 +1572,8 @@ fn wire_settings(app: &Rc<App>) {
         .set_app_version(updater::CURRENT_VERSION.into());
     app.settings_win
         .set_auto_check_on(app.state.borrow().settings.auto_check_update);
+    app.settings_win
+        .set_sort_by_use(app.state.borrow().settings.sort_by_use);
 
     let a = app.clone();
     app.settings_win
@@ -1227,6 +1611,7 @@ fn start_update_check(app: &Rc<App>, manual: bool) {
     app.settings_win.set_update_busy(true);
     if manual {
         app.settings_win.set_update_msg("正在检查更新…".into());
+        app.settings_win.set_update_msg_error(false);
     }
     std::thread::spawn(move || {
         let result = updater::fetch_latest(updater::CURRENT_VERSION);
@@ -1247,12 +1632,14 @@ fn start_update_check(app: &Rc<App>, manual: bool) {
                     Ok(None) => {
                         if manual {
                             a.settings_win.set_update_msg("已是最新版本 ✓".into());
+                            a.settings_win.set_update_msg_error(false);
                         }
                     }
                     Err(e) => {
                         if manual {
                             a.settings_win
                                 .set_update_msg(format!("检查失败:{e}").into());
+                            a.settings_win.set_update_msg_error(true);
                         }
                     }
                 }
@@ -1277,6 +1664,7 @@ fn start_update_install(app: &Rc<App>) {
     app.settings_win.set_update_busy(true);
     app.settings_win
         .set_update_msg(format!("正在下载 v{}…", update.version).into());
+    app.settings_win.set_update_msg_error(false);
     std::thread::spawn(move || {
         let result = updater::download_and_verify(&update);
         let _ = slint::invoke_from_event_loop(move || {
@@ -1288,6 +1676,7 @@ fn start_update_install(app: &Rc<App>) {
                         a.settings_win.set_update_busy(false);
                         a.settings_win
                             .set_update_msg(format!("更新失败:{e}").into());
+                        a.settings_win.set_update_msg_error(true);
                         return;
                     }
                 };
@@ -1303,6 +1692,7 @@ fn start_update_install(app: &Rc<App>) {
                         a.state.borrow_mut().update_busy = false;
                         a.settings_win.set_update_busy(false);
                         a.settings_win.set_update_msg(e.into());
+                        a.settings_win.set_update_msg_error(true);
                     }
                 }
             });
@@ -1343,6 +1733,8 @@ fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::
         .with_icon(icon)
         .with_tooltip("PetPhrase")
         .with_menu(Box::new(menu))
+        // 默认 true:左键也弹菜单,会和「左键找回宠物」叠成双重动作
+        .with_menu_on_left_click(false)
         .build()?;
 
     let (toggle_id, settings_id, quit_id) = (
@@ -1353,18 +1745,35 @@ fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::
     let update_id = update_item.id().clone();
     app.state.borrow_mut().update_menu = Some(update_item);
     let a = app.clone();
+    let wake_path = wake_signal_path();
     let poll = Box::leak(Box::new(slint::Timer::default()));
     poll.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(150),
         move || {
+            // 二实例唤醒:用户双击了程序图标 = 想看到宠,找回并打招呼
+            if wake_path.exists() {
+                let _ = std::fs::remove_file(&wake_path);
+                recover_pet(&a);
+            }
+            // 托盘图标左键单击 = 显示/找回宠(桌面软件惯例;菜单只挂在右键)
+            while let Ok(ev) = tray_icon::TrayIconEvent::receiver().try_recv() {
+                if let tray_icon::TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Left,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    ..
+                } = ev
+                {
+                    recover_pet(&a);
+                }
+            }
             while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                 if ev.id == toggle_id {
                     if a.pet.window().is_visible() {
                         let _ = a.pet.window().hide();
                         hide_panel(&a);
                     } else {
-                        let _ = a.pet.show();
+                        recover_pet(&a); // 顺带钳回屏内+重申置顶,屏外宠靠这里找回
                     }
                 } else if ev.id == settings_id {
                     open_settings(&a);

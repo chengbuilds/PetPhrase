@@ -7,6 +7,19 @@ use std::path::Path;
 pub struct Phrase {
     pub id: String,
     pub text: String,
+    /// 复制次数(「按使用频率排序」依据);旧数据缺省 0
+    #[serde(default)]
+    pub use_count: u32,
+}
+
+impl Phrase {
+    pub fn new(id: String, text: String) -> Self {
+        Phrase {
+            id,
+            text,
+            use_count: 0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -32,18 +45,12 @@ impl Default for PhraseData {
                 name: "常用".into(),
                 icon: Some("star".into()),
                 phrases: vec![
-                    Phrase {
-                        id: "p-1".into(),
-                        text: "收到,马上处理".into(),
-                    },
-                    Phrase {
-                        id: "p-2".into(),
-                        text: "好的,没问题".into(),
-                    },
-                    Phrase {
-                        id: "p-3".into(),
-                        text: "您好,感谢您的反馈,我们已经记录了这个问题,会尽快给您答复。".into(),
-                    },
+                    Phrase::new("p-1".into(), "收到,马上处理".into()),
+                    Phrase::new("p-2".into(), "好的,没问题".into()),
+                    Phrase::new(
+                        "p-3".into(),
+                        "您好,感谢您的反馈,我们已经记录了这个问题,会尽快给您答复。".into(),
+                    ),
                 ],
             }],
         }
@@ -68,6 +75,9 @@ pub struct Settings {
     /// 启动后自动检查更新(仅版本号查询,失败静默)
     #[serde(default = "default_true")]
     pub auto_check_update: bool,
+    /// 面板内短语按 use_count 降序排(仅影响面板展示;设置页保持手动序)
+    #[serde(default)]
+    pub sort_by_use: bool,
 }
 
 fn default_pet_id() -> String {
@@ -93,6 +103,7 @@ impl Default for Settings {
             custom_pet_dir: None,
             pet_scale: default_pet_scale(),
             auto_check_update: true,
+            sort_by_use: false,
         }
     }
 }
@@ -211,9 +222,11 @@ pub fn export_phrases(data: &PhraseData, dest: &Path) -> io::Result<()> {
     result
 }
 
-const MAX_GROUPS: usize = 500;
-const MAX_PHRASES_PER_GROUP: usize = 5000;
-const MAX_TEXT_CHARS: usize = 10_000;
+pub const MAX_GROUPS: usize = 500;
+pub const MAX_PHRASES_PER_GROUP: usize = 5000;
+pub const MAX_TEXT_CHARS: usize = 10_000;
+/// 导入文件大小上限:读入内存前先查 metadata,防异常大文件撑爆内存
+pub const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 导入数据的语义校验+修补:规模/超长文本报错;空名、空短语、缺失/重复 id 就地修补。
 fn sanitize_import(data: &mut PhraseData) -> Result<(), String> {
@@ -261,14 +274,32 @@ fn sanitize_import(data: &mut PhraseData) -> Result<(), String> {
     Ok(())
 }
 
-/// 校验外部文件后覆盖存储,返回导入结果。
-pub fn import_phrases(dir: &Path, src: &Path) -> io::Result<PhraseData> {
+/// 读取并校验外部导入文件,不落盘 —— 覆盖前由调用方弹确认、写快照。
+pub fn read_import(src: &Path) -> io::Result<PhraseData> {
+    let size = fs::metadata(src)?.len();
+    if size > MAX_IMPORT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "文件过大({}MB,上限 {}MB)",
+                size >> 20,
+                MAX_IMPORT_BYTES >> 20
+            ),
+        ));
+    }
     let text = fs::read_to_string(src)?;
     let mut data: PhraseData = serde_json::from_str(&text)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("文件格式不正确: {e}")))?;
     sanitize_import(&mut data).map_err(|m| io::Error::new(io::ErrorKind::InvalidData, m))?;
-    save_phrases(dir, &data)?;
     Ok(data)
+}
+
+const PRE_IMPORT_FILE: &str = "phrases.pre-import.json";
+
+/// 导入覆盖前把当前内存数据存一份快照,给误导入留退路。
+pub fn snapshot_before_import(dir: &Path, data: &PhraseData) -> io::Result<()> {
+    let json = serde_json::to_string_pretty(data).map_err(io::Error::other)?;
+    atomic_write(&dir.join(PRE_IMPORT_FILE), &json)
 }
 
 #[cfg(test)]
@@ -280,10 +311,7 @@ mod tests {
     fn save_then_load_roundtrip() {
         let dir = tempdir().unwrap();
         let mut data = PhraseData::default();
-        data.groups[0].phrases.push(Phrase {
-            id: "x".into(),
-            text: "测试".into(),
-        });
+        data.groups[0].phrases.push(Phrase::new("x".into(), "测试".into()));
         save_phrases(dir.path(), &data).unwrap();
         assert_eq!(load_phrases(dir.path()), data);
     }
@@ -369,7 +397,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        let data = import_phrases(dir.path(), &src).unwrap();
+        let data = read_import(&src).unwrap();
         assert_eq!(data.groups[0].name, "未命名");
         assert_eq!(data.groups[0].phrases.len(), 1, "空白短语被丢弃");
         assert_ne!(data.groups[0].id, data.groups[1].id, "重复分组 id 被重建");
@@ -388,8 +416,27 @@ mod tests {
             ),
         )
         .unwrap();
-        let err = import_phrases(dir.path(), &src).unwrap_err();
+        let err = read_import(&src).unwrap_err();
         assert!(err.to_string().contains("超长"));
+    }
+
+    #[test]
+    fn import_rejects_oversized_file_before_reading() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("huge.json");
+        let f = fs::File::create(&src).unwrap();
+        f.set_len(MAX_IMPORT_BYTES + 1).unwrap(); // 稀疏文件,不真占盘
+        let err = read_import(&src).unwrap_err();
+        assert!(err.to_string().contains("过大"));
+    }
+
+    #[test]
+    fn snapshot_before_import_writes_readable_copy() {
+        let dir = tempdir().unwrap();
+        let data = PhraseData::default();
+        snapshot_before_import(dir.path(), &data).unwrap();
+        let text = fs::read_to_string(dir.path().join("phrases.pre-import.json")).unwrap();
+        assert_eq!(serde_json::from_str::<PhraseData>(&text).unwrap(), data);
     }
 
     #[test]
@@ -413,7 +460,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let bad = dir.path().join("bad.json");
         fs::write(&bad, "not json").unwrap();
-        assert!(import_phrases(dir.path(), &bad).is_err());
+        assert!(read_import(&bad).is_err());
     }
 
     #[test]
@@ -422,8 +469,7 @@ mod tests {
         let data = PhraseData::default();
         let out = dir.path().join("out.json");
         export_phrases(&data, &out).unwrap();
-        let dir2 = tempdir().unwrap();
-        assert_eq!(import_phrases(dir2.path(), &out).unwrap(), data);
+        assert_eq!(read_import(&out).unwrap(), data);
     }
 
     #[test]
