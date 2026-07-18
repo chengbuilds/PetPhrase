@@ -77,20 +77,28 @@ export component PanelWindow inherits Window {
     in-out property <bool> undo-open: false;
     callback undo-clicked;
 
-    // 面板高度可调(仅高度;宽度固定 300):拖底部手柄,松手回调持久化
+    // 面板高度可调(仅高度;宽度固定 300):拖底部手柄,松手回调持久化;双击手柄回默认 400
     in-out property <float> panel-h: 400;
     callback height-resized(float);
+    // 拖高零闪烁方案:拖动开始把窗口一次性预扩到最大高(多出部分全透明),
+    // 拖动中只有内容盒(body-h)跟手 —— 纯重绘,无原生 resize、无亚克力重组;
+    // 松手才把窗口真正缩回最终高度。逐帧 resize 亚克力窗口会一闪一闪(实测)。
+    property <bool> resizing: false;
+    property <float> preview-h: 400;
+    property <length> body-h: (resizing ? preview-h : panel-h) * 1px;
 
     // 滚动归零:切分组/重开面板/搜索时由 Rust 调,免得新列表从上次滚动位置开始
     public function reset-scroll() {
         list-flick.viewport-y = 0;
+        // 拖高中途面板被 Esc 收起会留下 720 预扩态,重开时在此复位
+        resizing = false;
     }
 
     no-frame: true;
     always-on-top: true;
     background: transparent;
     width: 300px;
-    height: panel-h * 1px;
+    height: resizing ? 720px : panel-h * 1px;
     title: "常用语";
     icon: @image-url("icon.png");
     default-font-family: "Microsoft YaHei UI";
@@ -118,6 +126,7 @@ export component PanelWindow inherits Window {
         }
 
         Rectangle {
+            height: root.body-h; // 拖高时窗口预扩为最大,内容盒才是视觉上的面板
             border-radius: 14px;
             background: Theme.surface-panel;
             border-width: 1px;
@@ -506,7 +515,7 @@ export component PanelWindow inherits Window {
         // ---- 保存失败横幅(压底浮层;点击关闭) ----
         if root.save-error != "": Rectangle {
             x: 12px;
-            y: root.height - 42px;
+            y: root.body-h - 42px;
             width: root.width - 24px;
             height: 32px;
             border-radius: 8px;
@@ -533,7 +542,7 @@ export component PanelWindow inherits Window {
         // ---- 删除撤销横幅(与保存失败横幅同槽位,错开堆叠) ----
         if root.undo-open: Rectangle {
             x: 12px;
-            y: root.height - 42px - (root.save-error != "" ? 38px : 0px);
+            y: root.body-h - 42px - (root.save-error != "" ? 38px : 0px);
             width: root.width - 24px;
             height: 32px;
             border-radius: 8px;
@@ -574,9 +583,9 @@ export component PanelWindow inherits Window {
             }
         }
 
-        // ---- 底部拖高手柄(仅高度;宽度固定) ----
+        // ---- 底部拖高手柄(仅高度;宽度固定;双击回默认 400) ----
         Rectangle {
-            y: root.height - 8px;
+            y: root.body-h - 8px;
             height: 8px;
             width: root.width;
             Rectangle {
@@ -585,7 +594,8 @@ export component PanelWindow inherits Window {
                 x: (parent.width - 36px) / 2;
                 y: 2px;
                 border-radius: 2px;
-                background: grip-ta.has-hover || grip-ta.pressed ? Theme.text-placeholder : Theme.border-soft;
+                background: root.resizing ? Theme.accent
+                    : grip-ta.has-hover ? Theme.text-placeholder : Theme.border-soft;
                 animate background { duration: 150ms; }
             }
             grip-ta := TouchArea {
@@ -594,15 +604,25 @@ export component PanelWindow inherits Window {
                 pointer-event(e) => {
                     if (e.kind == PointerEventKind.down) {
                         self.start-h = root.panel-h;
-                    } else if (e.kind == PointerEventKind.up) {
+                        root.preview-h = root.panel-h;
+                        root.resizing = true;
+                    } else if (e.kind == PointerEventKind.up && root.resizing) {
+                        // 先落 panel-h 再退预扩态,窗口只在此处 resize 一次
+                        root.panel-h = root.preview-h;
+                        root.resizing = false;
                         root.height-resized(root.panel-h);
                     }
                 }
                 moved => {
                     if (self.pressed) {
                         // 320~720 与 Rust 侧 storage::PANEL_H_MIN/MAX 保持一致
-                        root.panel-h = Math.clamp(self.start-h + (self.mouse-y - self.pressed-y) / 1px, 320, 720);
+                        root.preview-h = Math.clamp(self.start-h + (self.mouse-y - self.pressed-y) / 1px, 320, 720);
                     }
+                }
+                double-clicked => {
+                    root.panel-h = 400;
+                    root.resizing = false;
+                    root.height-resized(400);
                 }
             }
         }
