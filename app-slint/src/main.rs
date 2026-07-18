@@ -645,7 +645,8 @@ fn wire_panel(app: &Rc<App>) {
     // ---- 右键菜单动作(LaidItem 带 group_idx/phrase_idx 定位回源数据) ----
     let a = app.clone();
     app.panel.on_item_delete_requested(move |i| {
-        {
+        // 下标过期没删到东西就别弹撤销横幅,横幅不能说谎
+        let removed = {
             let mut st = a.state.borrow_mut();
             let Some((gi, pi)) = st
                 .items
@@ -654,12 +655,17 @@ fn wire_panel(app: &Rc<App>) {
             else {
                 return;
             };
-            if let Some(g) = st.data.groups.get_mut(gi) {
-                if pi < g.phrases.len() {
+            match st.data.groups.get_mut(gi) {
+                Some(g) if pi < g.phrases.len() => {
                     let p = g.phrases.remove(pi);
                     st.last_deleted = Some((gi, pi, p));
+                    true
                 }
+                _ => false,
             }
+        };
+        if !removed {
+            return;
         }
         offer_undo(&a);
         persist_data(&a);
@@ -922,8 +928,9 @@ fn apply_import(app: &Rc<App>, data: storage::PhraseData) {
     }
     clear_undo(app);
     set_active_group(app, 0);
-    persist_data(app);
+    // 成功消息先写:persist 失败时 report_persist 的 ⚠ 会覆盖它,失败必须可见
     set_data_msg(app, "已导入 ✓(原数据备份在 phrases.pre-import.json)", false);
+    persist_data(app);
     refresh_settings(app);
     refresh_panel(app);
 }
@@ -1360,15 +1367,20 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_phrase_delete(move |i| {
-        {
+        let removed = {
             let mut st = a.state.borrow_mut();
             let idx = st.active_group;
-            if let Some(g) = st.data.groups.get_mut(idx) {
-                if (i as usize) < g.phrases.len() {
+            match st.data.groups.get_mut(idx) {
+                Some(g) if (i as usize) < g.phrases.len() => {
                     let p = g.phrases.remove(i as usize);
                     st.last_deleted = Some((idx, i as usize, p));
+                    true
                 }
+                _ => false,
             }
+        };
+        if !removed {
+            return;
         }
         offer_undo(&a);
         persist_data(&a);
@@ -1721,6 +1733,8 @@ fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::
         .with_icon(icon)
         .with_tooltip("PetPhrase")
         .with_menu(Box::new(menu))
+        // 默认 true:左键也弹菜单,会和「左键找回宠物」叠成双重动作
+        .with_menu_on_left_click(false)
         .build()?;
 
     let (toggle_id, settings_id, quit_id) = (
