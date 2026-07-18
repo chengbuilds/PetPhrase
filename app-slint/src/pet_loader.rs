@@ -77,15 +77,18 @@ pub fn load_thumb(path: &str) -> slint::Image {
 }
 
 /// 依序扫描多个根目录,每个根目录下的一级子目录 = 一个宠物包。
-/// 同 id 先到先得(内置目录优先级最高)。
+/// 同 id 先到先得(内置目录优先级最高);根目录内按名排序,
+/// 保证任何文件系统上(FAT/exFAT 不保序)列表顺序稳定。
 pub fn scan_pets(roots: &[&Path]) -> Vec<PetInfo> {
     let mut pets: Vec<PetInfo> = Vec::new();
     for root in roots {
         let Ok(entries) = fs::read_dir(root) else {
             continue;
         };
-        for entry in entries.flatten() {
-            if let Some(pet) = load_pet(&entry.path()) {
+        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        for dir in dirs {
+            if let Some(pet) = load_pet(&dir) {
                 if !pets.iter().any(|p| p.id == pet.id) {
                     pets.push(pet);
                 }
