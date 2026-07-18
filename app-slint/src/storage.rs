@@ -78,9 +78,6 @@ pub struct Settings {
     /// 面板内短语按 use_count 降序排(仅影响面板展示;设置页保持手动序)
     #[serde(default)]
     pub sort_by_use: bool,
-    /// 面板高度(逻辑像素;宽度固定 300 不可调)
-    #[serde(default = "default_panel_h")]
-    pub panel_h: f32,
 }
 
 fn default_pet_id() -> String {
@@ -95,13 +92,6 @@ fn default_pet_scale() -> f32 {
 fn default_true() -> bool {
     true
 }
-fn default_panel_h() -> f32 {
-    400.0
-}
-
-/// 面板高度可调范围(拖拽手柄与载入时都按此钳制)
-pub const PANEL_H_MIN: f32 = 320.0;
-pub const PANEL_H_MAX: f32 = 720.0;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -114,7 +104,6 @@ impl Default for Settings {
             pet_scale: default_pet_scale(),
             auto_check_update: true,
             sort_by_use: false,
-            panel_h: default_panel_h(),
         }
     }
 }

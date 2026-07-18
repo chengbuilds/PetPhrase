@@ -287,15 +287,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let solid = app.state.borrow().settings.theme == "solid";
     set_theme(&app, solid);
     app.pet.set_pet_scale(app.state.borrow().settings.pet_scale);
-    // 面板高度从设置恢复(载入时钳制,防手改配置文件出离谱值)
-    {
-        let mut st = app.state.borrow_mut();
-        st.settings.panel_h = st
-            .settings
-            .panel_h
-            .clamp(storage::PANEL_H_MIN, storage::PANEL_H_MAX);
-        app.panel.set_panel_h(st.settings.panel_h);
-    }
 
     wire_pet(&app);
     wire_panel(&app);
@@ -681,20 +672,6 @@ fn wire_panel(app: &Rc<App>) {
     let a = app.clone();
     app.panel.on_undo_clicked(move || undo_delete(&a));
 
-    // 拖高手柄松手:钳制、持久化、按新高重摆位置(面板在宠上方时高度变了要往上挪)
-    let a = app.clone();
-    app.panel.on_height_resized(move |h| {
-        let h = h.clamp(storage::PANEL_H_MIN, storage::PANEL_H_MAX);
-        a.state.borrow_mut().settings.panel_h = h;
-        a.panel.set_panel_h(h);
-        persist_settings(&a);
-        if let Some(p) = compute_panel_placement(&a) {
-            a.panel
-                .window()
-                .set_position(slint::PhysicalPosition::new(p.x as i32, p.y as i32));
-        }
-    });
-
     // 编辑/添加:面板内就地编辑器,不跳设置窗
     let a = app.clone();
     app.panel.on_item_edit_requested(move |i| {
@@ -969,10 +946,9 @@ fn ensure_panel_native(app: &Rc<App>) {
     app.state.borrow_mut().panel_native_ready = true;
 }
 
-/// 贴宠定位(物理像素);面板高度随设置可调
+/// 贴宠定位(物理像素)
 fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
     let scale = app.pet.window().scale_factor();
-    let panel_h = app.state.borrow().settings.panel_h;
     app.pet
         .window()
         .with_winit_window(|w: &winit::window::Window| {
@@ -995,7 +971,7 @@ fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
                     h: size.height as f32,
                 },
                 logic::PANEL_W * scale,
-                panel_h * scale,
+                logic::PANEL_H * scale,
                 logic::Rect {
                     x: mx,
                     y: my,
@@ -1023,8 +999,6 @@ fn show_panel(app: &Rc<App>) {
     app.state.borrow_mut().panel_got_focus = false;
 
     app.panel.set_search_text("".into());
-    app.panel
-        .set_panel_h(app.state.borrow().settings.panel_h);
     app.panel.invoke_reset_scroll();
     refresh_panel(app);
     dbg_log(&format!(

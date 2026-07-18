@@ -6,6 +6,7 @@ use crate::storage::PhraseData;
 pub const SHORT_MAX_CHARS: usize = 10;
 pub const FONT_PX: f32 = 13.0;
 pub const PANEL_W: f32 = 300.0;
+pub const PANEL_H: f32 = 400.0;
 pub const LIST_PAD: f32 = 10.0;
 pub const GAP: f32 = 6.0;
 const CHIP_PAD_X: f32 = 12.0;
