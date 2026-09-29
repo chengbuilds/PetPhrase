@@ -55,6 +55,13 @@ export struct PhraseRowUi {
     display: string,
 }
 
+/// 宠物库卡片;status 0 可安装 / 1 安装中 / 2 已安装 / 3 使用中
+export struct GalleryCardUi {
+    name: string,
+    thumb: image,
+    status: int,
+}
+
 export struct PetCardUi {
     name: string,
     err: string,

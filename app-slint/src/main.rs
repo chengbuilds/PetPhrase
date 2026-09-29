@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anim;
+mod gallery;
 mod logic;
 mod pet_loader;
 mod storage;
@@ -195,6 +196,20 @@ fn pet_scale_idx(scale: f32) -> i32 {
     }
 }
 
+/// petdex 标准安装位置:官方 CLI 与应用内宠物库都同时写这两处
+fn petdex_install_roots() -> Vec<PathBuf> {
+    match std::env::var("USERPROFILE") {
+        Ok(home) => {
+            let home = PathBuf::from(home);
+            vec![
+                home.join(".petdex").join("pets"),
+                home.join(".codex").join("pets"),
+            ]
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 fn pet_roots(custom: &Option<String>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -202,12 +217,8 @@ fn pet_roots(custom: &Option<String>) -> Vec<PathBuf> {
             roots.push(dir.join("pets"));
         }
     }
-    // petdex CLI 同时装到这两处;同名包按 id 去重,先到先得
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let home = PathBuf::from(home);
-        roots.push(home.join(".petdex").join("pets"));
-        roots.push(home.join(".codex").join("pets"));
-    }
+    // 同名包按 id 去重,先到先得
+    roots.extend(petdex_install_roots());
     if let Some(c) = custom {
         roots.push(PathBuf::from(c));
     }
@@ -262,6 +273,22 @@ struct State {
     idle_ms: u32,
     next_special: u32,
     last_frame_ms: u32,
+    /// 在线宠物库(设置窗「发现更多」打开时加载,关窗即释放)
+    gallery: Option<GalleryState>,
+}
+
+#[derive(Default)]
+struct GalleryState {
+    loading: bool,
+    pets: Vec<gallery::RemotePet>,
+    filtered: Vec<usize>,
+    page: usize,
+    thumbs: HashMap<String, slint::Image>,
+    /// 已尝试过拉缩略图的 slug(失败的不反复重试)
+    thumb_tried: HashSet<String>,
+    installing: HashSet<String>,
+    /// 关窗/重开后,旧的后台结果据此丢弃
+    token: u64,
 }
 
 struct App {
@@ -415,6 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             idle_ms: 0,
             next_special: rand_idle_ms(),
             last_frame_ms: 0,
+            gallery: None,
         }),
         hide_timer: slint::Timer::default(),
         move_timer: slint::Timer::default(),
@@ -469,6 +497,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let a = app.clone();
         app.settings_win.window().on_close_requested(move || {
             a.state.borrow_mut().thumb_cache.clear();
+            a.state.borrow_mut().gallery = None;
+            a.settings_win.set_pet_view(0);
+            a.settings_win
+                .set_gallery_cards(ModelRc::new(VecModel::from(Vec::<GalleryCardUi>::new())));
             a.settings_win
                 .set_pets(ModelRc::new(VecModel::from(Vec::<PetCardUi>::new())));
             let resume = std::mem::take(&mut a.state.borrow_mut().panel_resume_after_settings);
@@ -1473,26 +1505,36 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_pet_selected(move |i| {
-        // 扫描期只验文件存在;真解码成功才落选择,否则设置显示已换、桌面还是旧宠
-        let (id, sheet) = {
-            let st = a.state.borrow();
-            let Some(p) = st.pets.get(i as usize) else {
-                return;
-            };
-            if p.error.is_some() {
-                return;
-            }
-            (p.id.clone(), p.spritesheet.clone())
-        };
-        if try_load_sheet(&sheet).is_none() {
-            set_data_msg(&a, "⚠ 该宠物雪碧图无法解码(文件损坏?),已保留当前选择", true);
-            return;
+        let id = a.state.borrow().pets.get(i as usize).map(|p| p.id.clone());
+        if let Some(id) = id {
+            select_pet(&a, &id);
         }
-        a.state.borrow_mut().settings.pet_id = id;
-        persist_settings(&a);
-        refresh_pet_sprite(&a);
-        refresh_pet_cards(&a);
     });
+
+    let a = app.clone();
+    app.settings_win.on_gallery_open(move || open_gallery(&a));
+
+    let a = app.clone();
+    app.settings_win.on_gallery_search(move |q| {
+        if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
+            g.filtered = gallery::search(&g.pets, &q);
+            g.page = 0;
+        }
+        refresh_gallery(&a);
+    });
+
+    let a = app.clone();
+    app.settings_win.on_gallery_page(move |delta| {
+        if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
+            let pages = g.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1);
+            g.page = (g.page as i32 + delta).clamp(0, pages as i32 - 1) as usize;
+        }
+        refresh_gallery(&a);
+    });
+
+    let a = app.clone();
+    app.settings_win
+        .on_gallery_install(move |i| gallery_install(&a, i as usize));
 
     let a = app.clone();
     app.settings_win.on_pet_size_changed(move |i| {
@@ -1661,6 +1703,244 @@ fn wire_settings(app: &Rc<App>) {
         app.settings_win
             .set_autostart_on(al.is_enabled().unwrap_or(false));
     }
+}
+
+/// 选宠唯一入口(本地卡片/宠物库「使用」/安装后自动切换共用)。
+/// 扫描期只验文件存在;真解码成功才落选择,否则设置显示已换、桌面还是旧宠
+fn select_pet(app: &Rc<App>, id: &str) -> bool {
+    let sheet = {
+        let st = app.state.borrow();
+        match st.pets.iter().find(|p| p.id == id && p.error.is_none()) {
+            Some(p) => p.spritesheet.clone(),
+            None => return false,
+        }
+    };
+    if try_load_sheet(&sheet).is_none() {
+        set_data_msg(
+            app,
+            "⚠ 该宠物雪碧图无法解码(文件损坏?),已保留当前选择",
+            true,
+        );
+        return false;
+    }
+    app.state.borrow_mut().settings.pet_id = id.to_string();
+    persist_settings(app);
+    refresh_pet_sprite(app);
+    refresh_pet_cards(app);
+    refresh_gallery(app);
+    true
+}
+
+/* ================= 在线宠物库 ================= */
+
+fn thumb_cache_dir() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir());
+    base.join("PetPhrase").join("thumbs")
+}
+
+/// 切到「发现更多」:首次进入后台拉 manifest;已加载则直接刷新
+fn open_gallery(app: &Rc<App>) {
+    let token = {
+        let mut st = app.state.borrow_mut();
+        if st
+            .gallery
+            .as_ref()
+            .is_some_and(|g| g.loading || !g.pets.is_empty())
+        {
+            drop(st);
+            refresh_gallery(app);
+            return;
+        }
+        // 全局递增:关窗置 None 后重开,旧线程的结果也对不上号
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let token = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        st.gallery = Some(GalleryState {
+            loading: true,
+            token,
+            ..Default::default()
+        });
+        token
+    };
+    app.settings_win
+        .set_gallery_status("正在加载 petdex 宠物库…".into());
+    std::thread::spawn(move || {
+        let result = gallery::fetch_manifest();
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|a| {
+                let q = a.settings_win.get_gallery_query();
+                let failed = {
+                    let mut st = a.state.borrow_mut();
+                    if !st.gallery.as_ref().is_some_and(|g| g.token == token) {
+                        return; // 期间关过设置窗
+                    }
+                    match result {
+                        Ok(pets) => {
+                            let g = st.gallery.as_mut().expect("checked above");
+                            g.loading = false;
+                            g.filtered = gallery::search(&pets, &q);
+                            g.pets = pets;
+                            None
+                        }
+                        Err(e) => {
+                            st.gallery = None; // 下次进入重新加载
+                            Some(e)
+                        }
+                    }
+                };
+                match failed {
+                    Some(e) => a
+                        .settings_win
+                        .set_gallery_status(format!("⚠ {e},请稍后重试").into()),
+                    None => refresh_gallery(a),
+                }
+            });
+        });
+    });
+}
+
+/// 按当前页重建宠物库卡片;缺缩略图的一次性后台补拉,回来再刷一次
+fn refresh_gallery(app: &Rc<App>) {
+    let (cards, page, pages, total, fetch) = {
+        let mut guard = app.state.borrow_mut();
+        let st = &mut *guard;
+        let Some(g) = st.gallery.as_mut() else {
+            return;
+        };
+        if g.loading {
+            return;
+        }
+        let pages = g.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1);
+        g.page = g.page.min(pages - 1);
+        let on_page: Vec<gallery::RemotePet> = g
+            .filtered
+            .iter()
+            .skip(g.page * gallery::PAGE_SIZE)
+            .take(gallery::PAGE_SIZE)
+            .map(|&i| g.pets[i].clone())
+            .collect();
+        let cards: Vec<GalleryCardUi> = on_page
+            .iter()
+            .map(|p| {
+                let status = if st.settings.pet_id == p.slug {
+                    3
+                } else if st
+                    .pets
+                    .iter()
+                    .any(|lp| lp.id == p.slug && lp.error.is_none())
+                {
+                    2
+                } else if g.installing.contains(&p.slug) {
+                    1
+                } else {
+                    0
+                };
+                GalleryCardUi {
+                    name: p.name.clone().into(),
+                    thumb: g.thumbs.get(&p.slug).cloned().unwrap_or_default(),
+                    status,
+                }
+            })
+            .collect();
+        let need: Vec<gallery::RemotePet> = on_page
+            .into_iter()
+            .filter(|p| g.thumb_tried.insert(p.slug.clone()))
+            .collect();
+        let fetch = (!need.is_empty()).then_some((need, g.token));
+        (cards, g.page, pages, g.filtered.len(), fetch)
+    };
+    app.settings_win
+        .set_gallery_cards(ModelRc::new(VecModel::from(cards)));
+    app.settings_win
+        .set_gallery_page_label(format!("{} / {pages}", page + 1).into());
+    app.settings_win.set_gallery_status(
+        if total == 0 {
+            "没有匹配的宠物".to_string()
+        } else {
+            format!("共 {total} 只 · 数据来自 petdex.dev")
+        }
+        .into(),
+    );
+
+    let Some((need, token)) = fetch else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let files = gallery::fetch_thumbs(&need, &thumb_cache_dir());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|a| {
+                {
+                    let mut st = a.state.borrow_mut();
+                    let Some(g) = st.gallery.as_mut().filter(|g| g.token == token) else {
+                        return;
+                    };
+                    for (slug, path) in files {
+                        if let Some(img) = gallery::load_thumb(&path) {
+                            g.thumbs.insert(slug, img);
+                        }
+                    }
+                }
+                refresh_gallery(a);
+            });
+        });
+    });
+}
+
+/// 点宠物库卡片:未安装 → 后台下载安装并自动切换;已安装 → 直接切换
+fn gallery_install(app: &Rc<App>, idx: usize) {
+    let pet = {
+        let st = app.state.borrow();
+        let Some(g) = st.gallery.as_ref() else {
+            return;
+        };
+        match g.filtered.get(g.page * gallery::PAGE_SIZE + idx) {
+            Some(&i) => g.pets[i].clone(),
+            None => return,
+        }
+    };
+    let installed = app
+        .state
+        .borrow()
+        .pets
+        .iter()
+        .any(|p| p.id == pet.slug && p.error.is_none());
+    if installed {
+        select_pet(app, &pet.slug);
+        return;
+    }
+    {
+        let mut st = app.state.borrow_mut();
+        let Some(g) = st.gallery.as_mut() else {
+            return;
+        };
+        if !g.installing.insert(pet.slug.clone()) {
+            return; // 已在安装中
+        }
+    }
+    refresh_gallery(app);
+    std::thread::spawn(move || {
+        let result = gallery::install(&pet, &petdex_install_roots());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|a| {
+                if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
+                    g.installing.remove(&pet.slug);
+                }
+                match result {
+                    Ok(()) => {
+                        refresh_pets(a);
+                        if select_pet(a, &pet.slug) {
+                            set_data_msg(a, &format!("已安装并切换到「{}」✓", pet.name), false);
+                        }
+                    }
+                    Err(e) => {
+                        set_data_msg(a, &format!("⚠ 安装「{}」失败:{e}", pet.name), true);
+                        refresh_gallery(a);
+                    }
+                }
+            });
+        });
+    });
 }
 
 /* ================= 一键更新 ================= */
