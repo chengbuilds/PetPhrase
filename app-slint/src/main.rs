@@ -262,6 +262,10 @@ struct State {
     idle_ms: u32,
     next_special: u32,
     last_frame_ms: u32,
+    /// 拖动中:Some(RunLeft/RunRight) = 正在移动的方向;None = 未拖或按住不动
+    dragging: bool,
+    drag_run: Option<PetState>,
+    drag_x: i32,
 }
 
 struct App {
@@ -276,6 +280,8 @@ struct App {
     /// 帧定时器:每帧时长不同,单发链式续约
     frame_timer: slint::Timer,
     msg_timer: slint::Timer,
+    /// 拖动中停手检测:一段时间无 Moved 即视为按住不动,停止跑步
+    drag_timer: slint::Timer,
 }
 
 // 后台线程结果经 invoke_from_event_loop 回主线程时取 App:
@@ -415,6 +421,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             idle_ms: 0,
             next_special: rand_idle_ms(),
             last_frame_ms: 0,
+            dragging: false,
+            drag_run: None,
+            drag_x: 0,
         }),
         hide_timer: slint::Timer::default(),
         move_timer: slint::Timer::default(),
@@ -422,6 +431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         undo_timer: slint::Timer::default(),
         frame_timer: slint::Timer::default(),
         msg_timer: slint::Timer::default(),
+        drag_timer: slint::Timer::default(),
     });
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -566,7 +576,7 @@ fn recover_pet(app: &Rc<App>) {
     let _ = app.pet.show();
     clamp_pet_to_screen(app);
     assert_topmost(app.pet.window());
-    app.state.borrow_mut().animator.play(PetState::Wave, true);
+    app.state.borrow_mut().animator.play_once(PetState::Wave);
 }
 
 fn wire_pet(app: &Rc<App>) {
@@ -577,12 +587,17 @@ fn wire_pet(app: &Rc<App>) {
             open_settings(&a); // 素材缺失:点占位提示直达设置选宠
             return;
         }
-        a.state.borrow_mut().animator.play(PetState::Wave, true);
+        a.state.borrow_mut().animator.play_once(PetState::Wave);
         toggle_panel(&a);
     });
 
     let a = app.clone();
     app.pet.on_drag_start(move || {
+        {
+            let mut st = a.state.borrow_mut();
+            st.dragging = true;
+            st.drag_x = a.pet.window().position().x;
+        }
         a.pet
             .window()
             .with_winit_window(|w: &winit::window::Window| {
@@ -590,10 +605,23 @@ fn wire_pet(app: &Rc<App>) {
             });
     });
 
+    // 系统拖窗结束后 Slint 仍会收到松手的 click,pet.slint 据此发 drag-end
+    let a = app.clone();
+    app.pet.on_drag_end(move || {
+        a.drag_timer.stop();
+        {
+            let mut st = a.state.borrow_mut();
+            st.dragging = false;
+            st.drag_run = None;
+        }
+        update_pet_base(&a);
+    });
+
     // 拖完保存位置(去抖 500ms);常驻开启时面板实时跟随
     let a = app.clone();
     app.pet.window().on_winit_window_event(move |_, event| {
         if let winit::event::WindowEvent::Moved(pos) = event {
+            on_pet_dragged(&a, pos.x);
             if a.panel.get_pinned() && a.panel.window().is_visible() {
                 if let Some(p) = compute_panel_placement(&a) {
                     a.panel
@@ -614,6 +642,47 @@ fn wire_pet(app: &Rc<App>) {
         }
         slint::winit_030::EventResult::Propagate
     });
+}
+
+/// 持续情境 → 动画 base:拖动跑步 > 编辑审阅 > 面板等待 > 闲置。
+/// 面板显隐/编辑器开关/拖动状态变化后调用,情境只在这里判定
+fn update_pet_base(app: &Rc<App>) {
+    let panel_open = app.panel.window().is_visible();
+    let base = match app.state.borrow().drag_run {
+        Some(run) => run,
+        None if panel_open && app.panel.get_editor_open() => PetState::Review,
+        None if panel_open => PetState::Waiting,
+        None => PetState::Idle,
+    };
+    app.state.borrow_mut().animator.set_base(base);
+}
+
+/// 拖动中按水平位移方向播左/右跑;程序移窗(缩放/钳制/面板跟随)不在拖动态,不触发
+fn on_pet_dragged(app: &Rc<App>, x: i32) {
+    let run = {
+        let mut st = app.state.borrow_mut();
+        if !st.dragging {
+            return;
+        }
+        let dx = x - st.drag_x;
+        st.drag_x = x;
+        match dx {
+            d if d > 0 => PetState::RunRight,
+            d if d < 0 => PetState::RunLeft,
+            _ => return,
+        }
+    };
+    app.state.borrow_mut().drag_run = Some(run);
+    update_pet_base(app);
+    let a = app.clone();
+    app.drag_timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(250),
+        move || {
+            a.state.borrow_mut().drag_run = None;
+            update_pet_base(&a);
+        },
+    );
 }
 
 /// 解码雪碧图并识别图集几何;失败(文件损坏/非图片)返回 None
@@ -641,6 +710,7 @@ fn refresh_pet_sprite(app: &Rc<App>) {
     for path in &candidates {
         if let Some((img, atlas)) = try_load_sheet(path) {
             app.state.borrow_mut().animator = Animator::new(atlas.anim_rows());
+            update_pet_base(app); // 新动画机从 idle 起步,补回当前情境
             app.pet.set_cell_w(atlas.cell_w as i32);
             app.pet.set_cell_h(atlas.cell_h as i32);
             app.pet.set_sheet(img);
@@ -681,7 +751,7 @@ fn schedule_frame(app: &Rc<App>, delay_ms: u32) {
             let (row, col, dur) = {
                 let mut st = a.state.borrow_mut();
                 // 闲够一段随机时长播一个彩蛋动画
-                if st.animator.state() == PetState::Idle {
+                if st.animator.is_resting() {
                     st.idle_ms += st.last_frame_ms;
                     if st.idle_ms >= st.next_special {
                         st.idle_ms = 0;
@@ -689,7 +759,7 @@ fn schedule_frame(app: &Rc<App>, delay_ms: u32) {
                         let rows = st.animator.rows();
                         let rand = st.next_special; // 已是随机值,直接复用作挑选源
                         if let Some(s) = anim::pick_special(rows, rand) {
-                            st.animator.play(s, true);
+                            st.animator.play_once(s);
                         }
                     }
                 } else {
@@ -806,6 +876,9 @@ fn wire_panel(app: &Rc<App>) {
 
     let a = app.clone();
     app.panel.on_undo_clicked(move || undo_delete(&a));
+
+    let a = app.clone();
+    app.panel.on_editor_toggled(move || update_pet_base(&a));
 
     // 编辑/添加:面板内就地编辑器,不跳设置窗
     let a = app.clone();
@@ -941,7 +1014,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
         }
         persist_data(app); // 只落盘不刷面板:排序开着也不能在点击瞬间重排列表
         app.panel.set_copied_idx(i);
-        app.state.borrow_mut().animator.play(PetState::Wave, true);
+        app.state.borrow_mut().animator.play_once(PetState::Wave);
         let a = app.clone();
         if app.panel.get_pinned() {
             // 常驻:不收面板,✓ 反馈稍后自清
@@ -958,7 +1031,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
             );
         }
     } else {
-        app.state.borrow_mut().animator.play(PetState::Failed, true);
+        app.state.borrow_mut().animator.play_once(PetState::Failed);
         app.panel.set_failed_idx(i);
         app.panel
             .set_save_error("⚠ 复制失败,请重试(剪贴板被其它程序占用)".into());
@@ -1137,6 +1210,7 @@ fn show_panel(app: &Rc<App>) {
         .with_winit_window(|w: &winit::window::Window| {
             w.focus_window();
         });
+    update_pet_base(app);
 }
 
 fn dbg_log(msg: &str) {
@@ -1154,6 +1228,7 @@ fn hide_panel(app: &Rc<App>) {
     app.state.borrow_mut().pending_edit = None;
     app.panel.set_pinned(false); // 收起即解除常驻(点宠/Esc/图钉关,语义一致)
     let _ = app.panel.window().hide();
+    update_pet_base(app);
 }
 
 /* ================= 设置窗 ================= */
@@ -1165,6 +1240,7 @@ fn open_settings(app: &Rc<App>) {
         app.panel.set_ctx_open(false);
         app.panel.set_editor_open(false);
         let _ = app.panel.window().hide();
+        update_pet_base(app);
     }
     refresh_pets(app);
     refresh_pet_cards(app);
