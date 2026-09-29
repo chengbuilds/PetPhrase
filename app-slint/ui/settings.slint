@@ -212,12 +212,15 @@ export component SettingsWindow inherits Window {
     in-out property <int> drag-phrase: -1;
     in-out property <length> drag-phrase-dy: 0;
 
+    // 系统丢弃窗口画面后由 Rust 翻转,迫使整窗重画(见 main.rs os_invalidated)
+    in property <bool> repaint-flip;
+
     title: "PetPhrase 设置";
     icon: @image-url("icon.png");
     default-font-family: "Microsoft YaHei UI";
     width: 780px;
     height: 560px;
-    background: #f8fafc;
+    background: root.repaint-flip ? #f8fafc : #f8fafd;
     default-font-size: 13px;
 
     VerticalLayout {
