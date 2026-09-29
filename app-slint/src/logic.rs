@@ -6,7 +6,14 @@ use crate::storage::PhraseData;
 pub const SHORT_MAX_CHARS: usize = 10;
 pub const FONT_PX: f32 = 13.0;
 pub const PANEL_W: f32 = 300.0;
+/// 面板高度上下限;下限保证就地编辑器(230)放得下
 pub const PANEL_H: f32 = 400.0;
+pub const PANEL_MIN_H: f32 = 260.0;
+/// 搜索栏 + 分组 Tab 条
+const PANEL_HEADER_H: f32 = 82.0;
+/// 列表末尾「+ 添加」行 / 空分组引导区
+const ADD_ROW_H: f32 = 40.0;
+const EMPTY_STATE_H: f32 = 120.0;
 pub const LIST_PAD: f32 = 10.0;
 pub const GAP: f32 = 6.0;
 const CHIP_PAD_X: f32 = 12.0;
@@ -168,6 +175,16 @@ pub fn content_height(items: &[LaidItem]) -> f32 {
     items.iter().map(|i| i.y + i.h).fold(0.0, f32::max)
 }
 
+/// 面板随内容定高(逻辑像素):显示前算一次,内容少时不留大片空白
+pub fn panel_height(items: &[LaidItem]) -> f32 {
+    let list = if items.is_empty() {
+        EMPTY_STATE_H
+    } else {
+        content_height(items) + ADD_ROW_H
+    };
+    (PANEL_HEADER_H + list + LIST_PAD * 2.0).clamp(PANEL_MIN_H, PANEL_H)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -276,6 +293,28 @@ mod tests {
         // 关闭排序 = 手动序不变
         let manual = layout_group(&d, 0, 280.0, false);
         assert_eq!(manual[0].phrase_idx, 0);
+    }
+
+    #[test]
+    fn panel_height_fits_content_within_bounds() {
+        assert_eq!(panel_height(&[]), PANEL_MIN_H, "空分组取下限");
+        let few = layout_group(&data(), 0, 280.0, false);
+        let h = panel_height(&few);
+        assert!(h > PANEL_MIN_H && h < PANEL_H, "少量内容介于上下限:{h}");
+        let mut d = data();
+        d.groups[0].phrases = (0..60)
+            .map(|i| {
+                Phrase::new(
+                    i.to_string(),
+                    "这是一条会排成卡片的比较长的常用语内容".into(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            panel_height(&layout_group(&d, 0, 280.0, false)),
+            PANEL_H,
+            "超出取上限滚动"
+        );
     }
 
     #[test]

@@ -83,11 +83,14 @@ export component PanelWindow inherits Window {
         list-flick.viewport-y = 0;
     }
 
+    // 面板高度:每次显示前由 Rust 按内容一次性算好(不跟手 resize,亚克力逐帧改尺寸会闪)
+    in property <length> panel-h: 400px;
+
     no-frame: true;
     always-on-top: true;
     background: transparent;
     width: 300px;
-    height: 400px;
+    height: root.panel-h;
     title: "常用语";
     icon: @image-url("icon.png");
     default-font-family: "Microsoft YaHei UI";
@@ -202,13 +205,27 @@ export component PanelWindow inherits Window {
                                 border-radius: 999px;
                                 background: tab.active ? Theme.surface-tab-active : (tab-ta.has-hover ? Theme.surface-item-hover : Theme.surface-tab);
                                 height: 26px;
-                                width: tab-label.preferred-width + 24px;
+                                width: tab-row.preferred-width + 22px;
                                 animate background { duration: 150ms; }
-                                tab-label := Text {
-                                    text: tab.name;
-                                    color: tab.active ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
-                                    font-weight: tab.active ? 600 : 400;
+                                tab-row := HorizontalLayout {
+                                    x: 11px;
+                                    spacing: 4px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        GroupIcon {
+                                            idx: tab.icon-idx;
+                                            width: 12px;
+                                            height: 12px;
+                                            tint: tab.active ? Theme.accent : Theme.text-muted;
+                                        }
+                                    }
+                                    Text {
+                                        text: tab.name;
+                                        color: tab.active ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        font-weight: tab.active ? 600 : 400;
+                                        vertical-alignment: center;
+                                    }
                                 }
                                 tab-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -227,7 +244,8 @@ export component PanelWindow inherits Window {
                 // ---- 混排列表 ----
                 list-flick := Flickable {
                     vertical-stretch: 1;
-                    viewport-height: Math.max(root.content-h * 1px + 20px, self.height);
+                    // 末尾「+ 添加」占一行(搜索态不显示)
+                    viewport-height: Math.max(root.content-h * 1px + (root.search-text == "" && root.items.length > 0 ? 40px : 0px) + 20px, self.height);
 
                     Rectangle {
                         x: 10px;
@@ -315,13 +333,51 @@ export component PanelWindow inherits Window {
                             }
                         }
 
-                        if root.items.length == 0: Text {
+                        if root.search-text == "" && root.items.length > 0: Rectangle {
+                            x: 0;
+                            y: root.content-h * 1px + 6px;
+                            width: add-lbl.preferred-width + 28px;
+                            height: 28px;
+                            border-radius: 999px;
+                            border-width: 1px;
+                            border-color: add-ta.has-hover ? Theme.accent : Theme.border-soft;
+                            background: add-ta.has-hover ? Theme.surface-item-hover : transparent;
+                            add-lbl := Text {
+                                text: "+ 添加";
+                                color: add-ta.has-hover ? Theme.accent : Theme.text-muted;
+                                font-size: 12.5px;
+                            }
+                            add-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.item-add-requested(-1); }
+                            }
+                        }
+
+                        if root.items.length == 0 && root.search-text != "": Text {
                             y: 40px;
                             width: parent.width;
                             horizontal-alignment: center;
-                            text: root.search-text == "" ? "这个分组还没有常用语\n右键空白处添加,或点右上角 ⚙" : "没有匹配的常用语";
+                            text: "没有匹配的常用语";
                             color: Theme.text-muted;
                             font-size: 12px;
+                        }
+                        if root.items.length == 0 && root.search-text == "": VerticalLayout {
+                            y: 32px;
+                            width: parent.width;
+                            spacing: 12px;
+                            Text {
+                                horizontal-alignment: center;
+                                text: "这个分组还没有常用语";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                PrimaryButton {
+                                    text: "+ 添加常用语";
+                                    clicked => { root.item-add-requested(-1); }
+                                }
+                            }
                         }
                     }
                 }
@@ -339,7 +395,7 @@ export component PanelWindow inherits Window {
             border-radius: 10px;
             drop-shadow-blur: 24px;
             drop-shadow-color: #0f172a2e;
-            height: Math.min(280px, grid-inner.preferred-height + 20px);
+            height: Math.min(280px, root.height - 90px, grid-inner.preferred-height + 20px);
             clip: true;
 
             Flickable {
@@ -455,9 +511,9 @@ export component PanelWindow inherits Window {
             TouchArea { clicked => { root.editor-open = false; } }
             Rectangle {
                 x: 14px;
-                y: 70px;
+                y: Math.min(70px, (root.height - self.height) / 2);
                 width: parent.width - 28px;
-                height: 230px;
+                height: Math.min(230px, root.height - 28px);
                 background: Theme.surface-sheet;
                 border-width: 1px;
                 border-color: Theme.border-soft;
