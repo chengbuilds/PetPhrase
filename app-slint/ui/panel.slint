@@ -73,8 +73,9 @@ export component PanelWindow inherits Window {
     // 保存失败横幅文本(Rust 灌入,空 = 无错误;保存成功自动清,点横幅手动关)
     in-out property <string> save-error;
 
-    // 删除撤销:横幅带按钮,Rust 起 8s 定时自动收
+    // 删除撤销:横幅带按钮,Rust 起定时自动收;文案随删除对象(短语/分组)
     in-out property <bool> undo-open: false;
+    in property <string> undo-text;
     callback undo-clicked;
 
     // 滚动归零:切分组/重开面板/搜索时由 Rust 调,免得新列表从上次滚动位置开始
@@ -543,7 +544,7 @@ export component PanelWindow inherits Window {
                 padding-right: 6px;
                 spacing: 6px;
                 Text {
-                    text: "已删除 1 条常用语";
+                    text: root.undo-text;
                     color: Theme.text-secondary;
                     font-size: 11px;
                     vertical-alignment: center;
