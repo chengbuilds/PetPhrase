@@ -5,6 +5,9 @@ export component PetWindow inherits Window {
     in property <int> frame-col;
     in property <int> frame-row;
     in property <float> pet-scale: 1.0;
+    // 图集格子像素尺寸(Rust 按素材识别;等比缩放的素材不是 192×208)
+    in property <int> cell-w: 192;
+    in property <int> cell-h: 208;
     // 无可用宠物素材:显示占位提示,点击改为打开设置(Rust 侧判断)
     in property <bool> missing: false;
     callback pet-clicked;
@@ -24,10 +27,10 @@ export component PetWindow inherits Window {
         height: parent.height;
         source: root.sheet;
         image-fit: fill;
-        source-clip-x: root.frame-col * 192;
-        source-clip-y: root.frame-row * 208;
-        source-clip-width: 192;
-        source-clip-height: 208;
+        source-clip-x: root.frame-col * root.cell-w;
+        source-clip-y: root.frame-row * root.cell-h;
+        source-clip-width: root.cell-w;
+        source-clip-height: root.cell-h;
     }
 
     // 素材缺失占位:否则窗口全透明,用户以为程序没启动

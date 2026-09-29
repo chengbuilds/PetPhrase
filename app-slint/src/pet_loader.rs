@@ -1,8 +1,7 @@
-use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PetInfo {
     pub id: String,
     pub name: String,
@@ -12,7 +11,8 @@ pub struct PetInfo {
 }
 
 /// 单个宠物目录 → PetInfo。宽松校验:pet.json 可缺 name(用目录名),
-/// spritesheet.webp/png 必须存在。尺寸/网格由前端加载图片时推算。
+/// 雪碧图优先 pet.json 的 spritesheetPath(与官方桌面端一致),再回退 spritesheet.webp/png。
+/// 尺寸/网格在解码时按 anim::Atlas 推算。
 fn load_pet(dir: &Path) -> Option<PetInfo> {
     if !dir.is_dir() {
         return None;
@@ -20,6 +20,7 @@ fn load_pet(dir: &Path) -> Option<PetInfo> {
     let id = dir.file_name()?.to_string_lossy().to_string();
     let mut name = id.clone();
     let mut error: Option<String> = None;
+    let mut declared: Option<String> = None;
 
     match fs::read_to_string(dir.join("pet.json")) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
@@ -32,14 +33,22 @@ fn load_pet(dir: &Path) -> Option<PetInfo> {
                 {
                     name = n.to_string();
                 }
+                // 只取文件名部分:清单是外部文件,不让它指到包目录之外
+                declared = meta
+                    .get("spritesheetPath")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Path::new(s).file_name())
+                    .map(|f| f.to_string_lossy().to_string());
             }
             Err(e) => error = Some(format!("pet.json 解析失败: {e}")),
         },
         Err(_) => error = Some("缺少 pet.json".into()),
     }
 
-    let spritesheet = ["spritesheet.webp", "spritesheet.png"]
+    let spritesheet = declared
         .iter()
+        .map(String::as_str)
+        .chain(["spritesheet.webp", "spritesheet.png"])
         .map(|f| dir.join(f))
         .find(|p| p.is_file());
 
@@ -65,8 +74,14 @@ pub fn load_thumb(path: &str) -> slint::Image {
     let Ok(img) = image::open(Path::new(path)) else {
         return slint::Image::default();
     };
-    let w = crate::anim::FRAME_W.min(img.width());
-    let h = crate::anim::FRAME_H.min(img.height());
+    thumb_from_sheet(&img)
+}
+
+/// 按图集几何裁首格(等比缩放的素材格子不是 192×208)
+pub fn thumb_from_sheet(img: &image::DynamicImage) -> slint::Image {
+    let atlas = crate::anim::Atlas::from_size(img.width(), img.height());
+    let w = atlas.cell_w.min(img.width());
+    let h = atlas.cell_h.min(img.height());
     let frame = img.crop_imm(0, 0, w, h).into_rgba8();
     let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
         frame.as_raw(),
@@ -125,6 +140,30 @@ mod tests {
         );
         let pets = scan_pets(&[root.path()]);
         assert_eq!(pets[0].name, "Kun Like");
+    }
+
+    #[test]
+    fn declared_spritesheet_path_wins_and_cannot_escape_dir() {
+        let root = tempdir().unwrap();
+        make_pet(
+            root.path(),
+            "custom",
+            Some(r#"{"displayName":"C","spritesheetPath":"atlas.webp"}"#),
+            Some("atlas.webp"),
+        );
+        fs::write(root.path().join("custom").join("spritesheet.png"), b"x").unwrap();
+        let pets = scan_pets(&[root.path()]);
+        assert!(pets[0].spritesheet.ends_with("atlas.webp"));
+
+        make_pet(
+            root.path(),
+            "escape",
+            Some(r#"{"spritesheetPath":"../custom/atlas.webp"}"#),
+            None,
+        );
+        let pets = scan_pets(&[root.path()]);
+        let esc = pets.iter().find(|p| p.id == "escape").unwrap();
+        assert!(esc.error.is_some(), "../ 被截成文件名,包内不存在即报缺失");
     }
 
     #[test]
@@ -202,6 +241,11 @@ mod tests {
         let thumb = load_thumb(&path.to_string_lossy());
         let size = thumb.size();
         assert_eq!((size.width, size.height), (192, 208));
+
+        // 等比缩半的素材按格子裁,不按 192×208 硬切
+        image::RgbaImage::new(768, 936).save(&path).unwrap();
+        let size = load_thumb(&path.to_string_lossy()).size();
+        assert_eq!((size.width, size.height), (96, 104));
     }
 
     #[test]
