@@ -69,6 +69,9 @@ export component PanelWindow inherits Window {
     in property <string> editor-text;
     in property <bool> editor-is-add;
     callback editor-saved(string);
+    // 编辑器开关(含 Slint 侧取消/Esc/保存关闭),Rust 据此切宠物「审阅」动画
+    callback editor-toggled;
+    changed editor-open => { root.editor-toggled(); }
 
     // 保存失败横幅文本(Rust 灌入,空 = 无错误;保存成功自动清,点横幅手动关)
     in-out property <string> save-error;

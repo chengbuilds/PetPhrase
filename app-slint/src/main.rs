@@ -566,7 +566,7 @@ fn recover_pet(app: &Rc<App>) {
     let _ = app.pet.show();
     clamp_pet_to_screen(app);
     assert_topmost(app.pet.window());
-    app.state.borrow_mut().animator.play(PetState::Wave, true);
+    app.state.borrow_mut().animator.play_once(PetState::Wave);
 }
 
 fn wire_pet(app: &Rc<App>) {
@@ -577,7 +577,7 @@ fn wire_pet(app: &Rc<App>) {
             open_settings(&a); // 素材缺失:点占位提示直达设置选宠
             return;
         }
-        a.state.borrow_mut().animator.play(PetState::Wave, true);
+        a.state.borrow_mut().animator.play_once(PetState::Wave);
         toggle_panel(&a);
     });
 
@@ -616,6 +616,20 @@ fn wire_pet(app: &Rc<App>) {
     });
 }
 
+/// 持续情境 → 动画 base:编辑审阅 > 面板等待 > 闲置。
+/// 面板显隐/编辑器开关/拖动状态变化后调用,情境只在这里判定
+fn update_pet_base(app: &Rc<App>) {
+    let panel_open = app.panel.window().is_visible();
+    let base = if panel_open && app.panel.get_editor_open() {
+        PetState::Review
+    } else if panel_open {
+        PetState::Waiting
+    } else {
+        PetState::Idle
+    };
+    app.state.borrow_mut().animator.set_base(base);
+}
+
 /// 解码雪碧图并识别图集几何;失败(文件损坏/非图片)返回 None
 fn try_load_sheet(path: &str) -> Option<(slint::Image, anim::Atlas)> {
     let img = slint::Image::load_from_path(std::path::Path::new(path)).ok()?;
@@ -641,6 +655,7 @@ fn refresh_pet_sprite(app: &Rc<App>) {
     for path in &candidates {
         if let Some((img, atlas)) = try_load_sheet(path) {
             app.state.borrow_mut().animator = Animator::new(atlas.anim_rows());
+            update_pet_base(app); // 新动画机从 idle 起步,补回当前情境
             app.pet.set_cell_w(atlas.cell_w as i32);
             app.pet.set_cell_h(atlas.cell_h as i32);
             app.pet.set_sheet(img);
@@ -681,7 +696,7 @@ fn schedule_frame(app: &Rc<App>, delay_ms: u32) {
             let (row, col, dur) = {
                 let mut st = a.state.borrow_mut();
                 // 闲够一段随机时长播一个彩蛋动画
-                if st.animator.state() == PetState::Idle {
+                if st.animator.is_resting() {
                     st.idle_ms += st.last_frame_ms;
                     if st.idle_ms >= st.next_special {
                         st.idle_ms = 0;
@@ -689,7 +704,7 @@ fn schedule_frame(app: &Rc<App>, delay_ms: u32) {
                         let rows = st.animator.rows();
                         let rand = st.next_special; // 已是随机值,直接复用作挑选源
                         if let Some(s) = anim::pick_special(rows, rand) {
-                            st.animator.play(s, true);
+                            st.animator.play_once(s);
                         }
                     }
                 } else {
@@ -806,6 +821,9 @@ fn wire_panel(app: &Rc<App>) {
 
     let a = app.clone();
     app.panel.on_undo_clicked(move || undo_delete(&a));
+
+    let a = app.clone();
+    app.panel.on_editor_toggled(move || update_pet_base(&a));
 
     // 编辑/添加:面板内就地编辑器,不跳设置窗
     let a = app.clone();
@@ -941,7 +959,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
         }
         persist_data(app); // 只落盘不刷面板:排序开着也不能在点击瞬间重排列表
         app.panel.set_copied_idx(i);
-        app.state.borrow_mut().animator.play(PetState::Wave, true);
+        app.state.borrow_mut().animator.play_once(PetState::Wave);
         let a = app.clone();
         if app.panel.get_pinned() {
             // 常驻:不收面板,✓ 反馈稍后自清
@@ -958,7 +976,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
             );
         }
     } else {
-        app.state.borrow_mut().animator.play(PetState::Failed, true);
+        app.state.borrow_mut().animator.play_once(PetState::Failed);
         app.panel.set_failed_idx(i);
         app.panel
             .set_save_error("⚠ 复制失败,请重试(剪贴板被其它程序占用)".into());
@@ -1137,6 +1155,7 @@ fn show_panel(app: &Rc<App>) {
         .with_winit_window(|w: &winit::window::Window| {
             w.focus_window();
         });
+    update_pet_base(app);
 }
 
 fn dbg_log(msg: &str) {
@@ -1154,6 +1173,7 @@ fn hide_panel(app: &Rc<App>) {
     app.state.borrow_mut().pending_edit = None;
     app.panel.set_pinned(false); // 收起即解除常驻(点宠/Esc/图钉关,语义一致)
     let _ = app.panel.window().hide();
+    update_pet_base(app);
 }
 
 /* ================= 设置窗 ================= */
@@ -1165,6 +1185,7 @@ fn open_settings(app: &Rc<App>) {
         app.panel.set_ctx_open(false);
         app.panel.set_editor_open(false);
         let _ = app.panel.window().hide();
+        update_pet_base(app);
     }
     refresh_pets(app);
     refresh_pet_cards(app);
