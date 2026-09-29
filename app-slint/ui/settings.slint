@@ -104,11 +104,16 @@ export component SettingsWindow inherits Window {
     callback pet-size-changed(int);
     callback autostart-toggled(bool);
     callback pick-dir;
+    callback clear-dir;
     callback do-export;
     callback do-import;
+    callback dismiss-msg;
 
     in-out property <int> editing-idx: -1;
+    // 0 常用语 / 1 桌宠 / 2 通用
     in-out property <int> page: 0;
+    // 分组图标选择浮层
+    in-out property <bool> icon-picker-open: false;
     // 分组名编辑态;切换/新建/删除分组时由 Rust refresh_settings 强制复位
     in-out property <bool> renaming: false;
 
@@ -140,7 +145,7 @@ export component SettingsWindow inherits Window {
                 padding-top: 6px;
                 spacing: 4px;
                 alignment: start;
-                for label[i] in ["常用语", "外观与行为"]: Rectangle {
+                for label[i] in ["常用语", "桌宠", "通用"]: Rectangle {
                     width: pt.preferred-width + 32px;
                     pt := Text {
                         text: label;
@@ -270,17 +275,37 @@ export component SettingsWindow inherits Window {
                 spacing: 0;
                 horizontal-stretch: 1;
 
-                // 分组头:大号内联改名 + 图标选择 + 幽灵删除
+                // 分组头:图标(点击弹出选择)+ 大号内联改名 + 幽灵删除
                 Rectangle {
-                    height: 92px;
+                    height: 56px;
                     background: #ffffff;
-                    VerticalLayout {
-                        padding-left: 16px;
+                    HorizontalLayout {
+                        padding-left: 12px;
                         padding-right: 16px;
-                        padding-top: 10px;
-                        spacing: 8px;
-                        HorizontalLayout {
-                            spacing: 8px;
+                        spacing: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                border-radius: 8px;
+                                background: root.icon-picker-open ? Theme.accent-soft : (gi-ta.has-hover ? #f1f5f9 : transparent);
+                                animate background { duration: 150ms; }
+                                GroupIcon {
+                                    idx: root.group-icon-idx;
+                                    width: 18px;
+                                    height: 18px;
+                                    tint: Theme.accent;
+                                }
+                                gi-ta := TouchArea {
+                                    enabled: root.has-group;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.icon-picker-open = !root.icon-picker-open; }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
                             // 分组名两态:显示态(Text 绑定,悬停出铅笔)/ 编辑态(TextInput + 下划线)。
                             // 不能让 TextInput 常驻绑定 group-name:用户一打字绑定即被拆,之后永不跟随
                             Rectangle {
@@ -364,42 +389,22 @@ export component SettingsWindow inherits Window {
                                     background: Theme.accent;
                                 }
                             }
-                            Rectangle { horizontal-stretch: 1; }
-                            if root.can-undo: GhostButton {
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        if root.can-undo: VerticalLayout {
+                            alignment: center;
+                            GhostButton {
                                 text: "撤销删除";
                                 clicked => { root.undo-delete(); }
                             }
-                            if root.has-group: GhostButton {
+                        }
+                        if root.has-group: VerticalLayout {
+                            alignment: center;
+                            GhostButton {
                                 text: "删除分组";
                                 danger: true;
                                 icon: @image-url("icons/trash-2.svg");
                                 clicked => { root.group-delete(); }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 2px;
-                            alignment: start;
-                            for icon-i in 12: Rectangle {
-                                width: 26px;
-                                height: 26px;
-                                border-radius: 6px;
-                                background: root.group-icon-idx == icon-i ? Theme.accent-soft : (ic-ta.has-hover ? #f1f5f9 : transparent);
-                                VerticalLayout {
-                                    alignment: center;
-                                    HorizontalLayout {
-                                        alignment: center;
-                                        GroupIcon {
-                                            idx: icon-i;
-                                            width: 14px;
-                                            height: 14px;
-                                            tint: root.group-icon-idx == icon-i ? Theme.accent : Theme.text-muted;
-                                        }
-                                    }
-                                }
-                                ic-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.group-icon-set(icon-i); }
-                                }
                             }
                         }
                     }
@@ -591,7 +596,7 @@ export component SettingsWindow inherits Window {
             }
         }
 
-        // ================= 外观与行为页 =================
+        // ================= 桌宠页 =================
         if root.page == 1: ScrollView {
             vertical-stretch: 1;
             VerticalLayout {
@@ -599,12 +604,29 @@ export component SettingsWindow inherits Window {
                 spacing: 10px;
                 alignment: start;
 
-                Text { text: "桌宠形象"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                Text {
-                    text: "扫描内置宠物、~/.petdex/pets 与 ~/.codex/pets(npx petdex 安装位置)及自定义目录,兼容 petdex 格式(含 v2 图集)。";
-                    font-size: 12px;
-                    color: Theme.text-muted;
-                    wrap: word-wrap;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Text { text: "桌宠形象"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
+                        Text {
+                            text: "兼容 petdex 格式,扫描内置、~/.petdex/pets、~/.codex/pets 与自定义目录。";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        SegmentedRow {
+                            width: 168px;
+                            labels: ["小", "中", "大"];
+                            selected: root.pet-size-idx;
+                            changed(i) => { root.pet-size-changed(i); }
+                        }
+                    }
                 }
 
                 // 宠物多行网格:每行 5 张(780 窗宽 - 48 padding 下第 6 张会截断)
@@ -620,8 +642,16 @@ export component SettingsWindow inherits Window {
                     }
                 }
                 HorizontalLayout {
-                    spacing: 12px;
-                    GhostButton { text: "选择自定义宠物目录…"; clicked => { root.pick-dir(); } }
+                    spacing: 8px;
+                    GhostButton {
+                        text: root.custom-dir == "" ? "从文件夹添加宠物…" : "更换自定义目录…";
+                        icon: @image-url("icons/folder.svg");
+                        clicked => { root.pick-dir(); }
+                    }
+                    if root.custom-dir != "": GhostButton {
+                        text: "移除";
+                        clicked => { root.clear-dir(); }
+                    }
                     Text {
                         text: root.custom-dir;
                         font-size: 12px;
@@ -631,13 +661,43 @@ export component SettingsWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                 }
+            }
+        }
 
-                Rectangle { height: 8px; }
-                Text { text: "桌宠大小"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                SegmentedRow {
-                    labels: ["小", "中", "大"];
-                    selected: root.pet-size-idx;
-                    changed(i) => { root.pet-size-changed(i); }
+        // ================= 通用页 =================
+        if root.page == 2: ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 24px;
+                spacing: 10px;
+                alignment: start;
+
+                Text { text: "关于与更新"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Text {
+                        text: "当前版本 v" + root.app-version;
+                        font-size: 12.5px;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                    if !root.update-available: GhostButton {
+                        text: "检查更新";
+                        enabled: !root.update-busy;
+                        clicked => { root.check-update(); }
+                    }
+                    if root.update-available: PrimaryButton {
+                        text: "立即更新";
+                        enabled: !root.update-busy;
+                        clicked => { root.do-update(); }
+                    }
+                    Text {
+                        text: root.update-msg;
+                        font-size: 12px;
+                        color: root.update-msg-error ? Theme.danger : Theme.text-muted;
+                        vertical-alignment: center;
+                    }
                 }
 
                 Rectangle { height: 8px; }
@@ -675,50 +735,6 @@ export component SettingsWindow inherits Window {
                     }
                     Text { text: "面板按使用频率排序(常用的排前面)"; vertical-alignment: center; color: Theme.text-secondary; }
                 }
-
-                Rectangle { height: 8px; }
-                Text { text: "数据"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: start;
-                    GhostButton { text: "导出常用语…"; icon: @image-url("icons/download.svg"); clicked => { root.do-export(); } }
-                    GhostButton { text: "导入常用语…"; icon: @image-url("icons/upload.svg"); clicked => { root.do-import(); } }
-                    Text {
-                        text: root.data-msg;
-                        font-size: 12px;
-                        color: root.data-msg-error ? Theme.danger : Theme.text-muted;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle { height: 8px; }
-                Text { text: "关于与更新"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: start;
-                    Text {
-                        text: "当前版本 v" + root.app-version;
-                        font-size: 12.5px;
-                        color: Theme.text-secondary;
-                        vertical-alignment: center;
-                    }
-                    if !root.update-available: GhostButton {
-                        text: "检查更新";
-                        enabled: !root.update-busy;
-                        clicked => { root.check-update(); }
-                    }
-                    if root.update-available: PrimaryButton {
-                        text: "立即更新";
-                        enabled: !root.update-busy;
-                        clicked => { root.do-update(); }
-                    }
-                    Text {
-                        text: root.update-msg;
-                        font-size: 12px;
-                        color: root.update-msg-error ? Theme.danger : Theme.text-muted;
-                        vertical-alignment: center;
-                    }
-                }
                 HorizontalLayout {
                     alignment: start;
                     spacing: 8px;
@@ -729,9 +745,79 @@ export component SettingsWindow inherits Window {
                             root.auto-check-toggled(v);
                         }
                     }
-                    Text { text: "启动时自动检查更新"; vertical-alignment: center; color: Theme.text-secondary; }
+                    Text { text: "自动检查更新"; vertical-alignment: center; color: Theme.text-secondary; }
+                }
+
+                Rectangle { height: 8px; }
+                Text { text: "数据"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    GhostButton { text: "导出常用语…"; icon: @image-url("icons/download.svg"); clicked => { root.do-export(); } }
+                    GhostButton { text: "导入常用语…"; icon: @image-url("icons/upload.svg"); clicked => { root.do-import(); } }
                 }
             }
+        }
+    }
+
+    // ---- 分组图标选择浮层(点分组头图标打开,点外面关) ----
+    if root.icon-picker-open: Rectangle {
+        TouchArea { clicked => { root.icon-picker-open = false; } }
+        Rectangle {
+            x: 208px;
+            y: 42px + 50px;
+            width: 6 * 32px + 5 * 4px + 16px;
+            height: 2 * 32px + 4px + 16px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+            border-radius: 10px;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #0f172a2e;
+            TouchArea { } // 挡穿透
+            for icon-i in 12: Rectangle {
+                x: 8px + Math.mod(icon-i, 6) * 36px;
+                y: 8px + Math.floor(icon-i / 6) * 36px;
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                background: root.group-icon-idx == icon-i ? Theme.accent-soft : (ic-ta.has-hover ? #f1f5f9 : transparent);
+                GroupIcon {
+                    idx: icon-i;
+                    tint: root.group-icon-idx == icon-i ? Theme.accent : Theme.text-muted;
+                }
+                ic-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.icon-picker-open = false;
+                        root.group-icon-set(icon-i);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 全局消息条(所有页可见;以前只在「数据」区显示,常用语页的报错用户看不到) ----
+    if root.data-msg != "": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - 16px;
+        width: Math.min(msg-text.preferred-width + 48px, parent.width - 48px);
+        height: 36px;
+        border-radius: 8px;
+        background: root.data-msg-error ? #fef2f2 : #1e293b;
+        border-width: root.data-msg-error ? 1px : 0;
+        border-color: Theme.danger;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: #0f172a33;
+        msg-text := Text {
+            text: root.data-msg;
+            font-size: 12.5px;
+            color: root.data-msg-error ? Theme.danger : #ffffff;
+            overflow: elide;
+        }
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.dismiss-msg(); }
         }
     }
 
@@ -741,7 +827,7 @@ export component SettingsWindow inherits Window {
         TouchArea { clicked => { root.confirm-visible = false; } }
         Rectangle {
             width: 320px;
-            height: 200px;
+            height: confirm-col.preferred-height;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #ffffff;
@@ -749,7 +835,7 @@ export component SettingsWindow inherits Window {
             drop-shadow-blur: 40px;
             drop-shadow-color: #0f172a47;
             TouchArea { } // 挡穿透
-            VerticalLayout {
+            confirm-col := VerticalLayout {
                 padding: 20px;
                 spacing: 8px;
                 alignment: center;
