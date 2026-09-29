@@ -64,6 +64,8 @@ export struct GalleryCardUi {
 
 export struct PetCardUi {
     name: string,
+    /// 装在 petdex 标准目录里的才可删(内置/自定义目录不给删)
+    removable: bool,
     err: string,
     selected: bool,
     thumb: image,

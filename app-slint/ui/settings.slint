@@ -65,6 +65,7 @@ component GalleryCard inherits Rectangle {
 component PetCard inherits Rectangle {
     in property <PetCardUi> pet;
     callback clicked;
+    callback delete-clicked;
     width: 118px;
     height: 132px;
     border-radius: 12px;
@@ -103,6 +104,25 @@ component PetCard inherits Rectangle {
         enabled: pet.err == "";
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+    }
+    // 删除入口常显在右上角(淡色,悬停变红),放在 pet-ta 之后才能盖住它接收点击
+    if pet.removable: Rectangle {
+        x: parent.width - self.width - 4px;
+        y: 4px;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        background: del-ta.has-hover ? #fef2f2 : transparent;
+        Image {
+            source: @image-url("icons/trash-2.svg");
+            colorize: del-ta.has-hover ? Theme.danger : Theme.text-placeholder;
+            width: 13px;
+            height: 13px;
+        }
+        del-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.delete-clicked(); }
+        }
     }
 }
 
@@ -157,6 +177,7 @@ export component SettingsWindow inherits Window {
     callback phrase-delete(int);
     callback phrase-dropped(int, int);
     callback pet-selected(int);
+    callback pet-delete(int);
     callback theme-toggled(bool); // true=solid
     callback pet-size-changed(int);
     callback autostart-toggled(bool);
@@ -713,6 +734,7 @@ export component SettingsWindow inherits Window {
                         for colidx in Math.min(5, root.pets.length - rowidx * 5): PetCard {
                             pet: root.pets[rowidx * 5 + colidx];
                             clicked => { root.pet-selected(rowidx * 5 + colidx); }
+                            delete-clicked => { root.pet-delete(rowidx * 5 + colidx); }
                         }
                     }
                     HorizontalLayout {
