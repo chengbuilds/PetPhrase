@@ -57,12 +57,22 @@ impl Default for PhraseData {
     }
 }
 
+/// 面板主题;未知值按亚克力读,别让一个字段毁掉整份设置
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Solid,
+    #[default]
+    #[serde(other)]
+    Acrylic,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Settings {
     #[serde(default = "default_pet_id")]
     pub pet_id: String,
-    #[serde(default = "default_theme")]
-    pub theme: String,
+    #[serde(default)]
+    pub theme: Theme,
     #[serde(default)]
     pub pet_pos: Option<(i32, i32)>,
     #[serde(default)]
@@ -83,9 +93,6 @@ pub struct Settings {
 fn default_pet_id() -> String {
     "default".into()
 }
-fn default_theme() -> String {
-    "acrylic".into()
-}
 fn default_pet_scale() -> f32 {
     1.0
 }
@@ -97,7 +104,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             pet_id: default_pet_id(),
-            theme: default_theme(),
+            theme: Theme::Acrylic,
             pet_pos: None,
             last_group: None,
             custom_pet_dir: None,
@@ -225,6 +232,19 @@ pub fn export_phrases(data: &PhraseData, dest: &Path) -> io::Result<()> {
 pub const MAX_GROUPS: usize = 500;
 pub const MAX_PHRASES_PER_GROUP: usize = 5000;
 pub const MAX_TEXT_CHARS: usize = 10_000;
+
+/// 短语文本唯一入口校验(面板编辑器/设置页/导入共用):去首尾空白,拒空与超长
+pub fn validate_text(text: &str) -> Result<String, String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Err("内容不能为空".into());
+    }
+    let n = t.chars().count();
+    if n > MAX_TEXT_CHARS {
+        return Err(format!("内容过长({n} 字,上限 {MAX_TEXT_CHARS})"));
+    }
+    Ok(t.to_string())
+}
 /// 导入文件大小上限:读入内存前先查 metadata,防异常大文件撑爆内存
 pub const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -253,17 +273,10 @@ fn sanitize_import(data: &mut PhraseData) -> Result<(), String> {
                 g.phrases.len()
             ));
         }
-        if let Some(p) = g
-            .phrases
-            .iter()
-            .find(|p| p.text.chars().count() > MAX_TEXT_CHARS)
-        {
-            return Err(format!(
-                "存在超长短语({} 字,上限 {MAX_TEXT_CHARS})",
-                p.text.chars().count()
-            ));
-        }
         g.phrases.retain(|p| !p.text.trim().is_empty());
+        for p in &mut g.phrases {
+            p.text = validate_text(&p.text).map_err(|e| format!("存在超长短语:{e}"))?;
+        }
         for p in &mut g.phrases {
             while p.id.trim().is_empty() || !ids.insert(p.id.clone()) {
                 n += 1;
@@ -376,7 +389,7 @@ mod tests {
     fn settings_recover_from_backup_when_main_corrupt() {
         let dir = tempdir().unwrap();
         let s = Settings {
-            theme: "solid".into(),
+            theme: Theme::Solid,
             ..Settings::default()
         };
         save_settings(dir.path(), &s).unwrap();
@@ -446,7 +459,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let s = load_settings(dir.path());
         assert_eq!(s.pet_id, "default");
-        assert_eq!(s.theme, "acrylic");
+        assert_eq!(s.theme, Theme::Acrylic);
         assert_eq!(s.pet_scale, 1.0);
         let changed = Settings {
             pet_pos: Some((100, 200)),
@@ -455,6 +468,35 @@ mod tests {
         };
         save_settings(dir.path(), &changed).unwrap();
         assert_eq!(load_settings(dir.path()), changed);
+    }
+
+    #[test]
+    fn theme_reads_old_strings_and_tolerates_unknown() {
+        let s: Settings = serde_json::from_str(r#"{"theme":"solid"}"#).unwrap();
+        assert_eq!(s.theme, Theme::Solid);
+        let s: Settings = serde_json::from_str(r#"{"theme":"neon"}"#).unwrap();
+        assert_eq!(s.theme, Theme::Acrylic);
+        assert!(serde_json::to_string(&s)
+            .unwrap()
+            .contains(r#""theme":"acrylic""#));
+    }
+
+    #[test]
+    fn validate_text_trims_and_rejects() {
+        assert_eq!(
+            validate_text(
+                "  hi 
+"
+            )
+            .unwrap(),
+            "hi"
+        );
+        assert!(validate_text(
+            " 
+ "
+        )
+        .is_err());
+        assert!(validate_text(&"x".repeat(MAX_TEXT_CHARS + 1)).is_err());
     }
 
     #[test]
