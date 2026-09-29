@@ -40,7 +40,8 @@
 
 ## 🎯 功能
 
-- **桌宠**:透明置顶、雪碧图待机动画,点击招手,可拖拽并记住位置;大小三档可调(小/中/大),缩放时脚位不动
+- **桌宠**:透明置顶,完整支持 petdex 9 种动作——点击招手、拖动时左右跑、打开面板时等待、编辑时审阅,闲时随机彩蛋;可拖拽并记住位置,大小三档可调,缩放时脚位不动
+- **在线宠物库**:设置里直接浏览、搜索、一键安装 petdex 上的数千只桌宠
 - **常用语面板**:贴宠弹出;分组胶囊 Tab + 全组宫格;短句排成气泡流、长句卡片;搜索跨组过滤;点击复制 + ✓ 反馈 + 自动收起;失焦即隐
 - **📌 面板常驻**:点亮图钉后连续复制多条不收起,拖动桌宠面板实时跟随;再点图钉/点桌宠/Esc 收起
 - **右键就地管理**:面板里右键短语可直接编辑/删除,右键空白处快速添加,弹出即可输入,不用打开设置窗
@@ -54,27 +55,19 @@
 
 PetPhrase 兼容 [petdex](https://petdex.dev/) 桌宠格式——那个在 X 上火过的 Codex 桌宠生态。
 
-**前置条件**:已安装 [Node.js](https://nodejs.org/)(自带 `npx`,无需全局安装 petdex)。
-
-去 [petdex.dev](https://petdex.dev/) 逛一圈,挑一只喜欢的,一行命令装好:
-
-```bash
-npx petdex@latest install <pet-name>
-
-# 例如,装爱坤和哆啦A梦:
-npx petdex@latest install kun-like
-npx petdex@latest install doraemon
-```
+打开 PetPhrase 设置 →「桌宠」→「发现更多」,直接浏览、搜索 petdex 上的全部桌宠,点「安装」即下载并切换,**无需 Node.js、无需重启**。同页右上角可调桌宠大小(小/中/大)。
 
 | `kun-like` | `doraemon` |
 |:---:|:---:|
 | ![爱坤](screenshots/kun-like.png) | ![哆啦A梦](screenshots/doraemon.png) |
 
-然后打开 PetPhrase 设置 →「外观与行为」,新桌宠已经出现在列表里,点选即换,**无需重启**。同页还能调桌宠大小(小/中/大)。
+习惯命令行也可以用官方 CLI(需要 [Node.js](https://nodejs.org/)),装好的桌宠同样会出现在「已安装」里:
 
-> 常用命令的话,也可以 `npm install -g petdex`,之后直接敲 `petdex install <pet-name>`。
+```bash
+npx petdex@latest install kun-like
+```
 
-也支持完全自定义:任意目录放上 `pet.json + spritesheet.webp/png`(参考 [petdex 格式](https://github.com/crafter-station/petdex)),在设置里指定该目录即可。
+也支持完全自定义:任意目录放上 `pet.json + spritesheet.webp/png`(参考 [petdex 格式](https://github.com/crafter-station/petdex),支持 8×9 与 8×11 图集),在「桌宠」页点「从文件夹添加宠物…」即可。
 
 ## 📋 使用示例
 

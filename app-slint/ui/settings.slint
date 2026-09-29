@@ -1,8 +1,65 @@
 import { ListView, ScrollView } from "std-widgets.slint";
 import {
     Theme, GroupRowUi, PhraseRowUi, PetCardUi, GroupIcon, IconButton,
-    PrimaryButton, GhostButton, InputArea, SegmentedPair, SegmentedRow, ToggleSwitch
+    PrimaryButton, GhostButton, InputArea, SegmentedPair, SegmentedRow, ToggleSwitch, GalleryCardUi
 } from "common.slint";
+
+/// 宠物库卡片:缩略图 + 名称 + 状态按钮;已安装的点击即切换
+component GalleryCard inherits Rectangle {
+    in property <GalleryCardUi> card;
+    callback clicked;
+    width: 130px;
+    height: 124px;
+    border-radius: 12px;
+    border-width: card.status == 3 ? 2px : 1px;
+    border-color: card.status == 3 ? Theme.accent : (gc-ta.has-hover ? #cbd5e1 : #e2e8f0);
+    background: card.status == 3 ? #fff7ed : #ffffff;
+    VerticalLayout {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 56px;
+                height: 56px;
+                border-radius: 8px;
+                background: card.thumb.width > 0 ? transparent : #f1f5f9;
+                Image { source: card.thumb; width: 56px; height: 56px; image-fit: contain; }
+            }
+        }
+        Text {
+            text: card.name;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            color: Theme.text-primary;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: st.preferred-width + 20px;
+                height: 22px;
+                border-radius: 11px;
+                background: card.status == 0 ? (gc-ta.has-hover ? #ea580c : Theme.accent)
+                    : card.status == 2 ? (gc-ta.has-hover ? #e2e8f0 : #f1f5f9)
+                    : transparent;
+                st := Text {
+                    text: card.status == 0 ? "安装" : card.status == 1 ? "安装中…" : card.status == 2 ? "使用" : "使用中";
+                    font-size: 11.5px;
+                    font-weight: 600;
+                    color: card.status == 0 ? #ffffff : card.status == 3 ? Theme.accent : Theme.text-secondary;
+                }
+            }
+        }
+    }
+    gc-ta := TouchArea {
+        enabled: card.status == 0 || card.status == 2;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
 
 /// 宠物卡(网格内复用;err 非空 = 不可选,半透明展示错误)
 component PetCard inherits Rectangle {
@@ -114,6 +171,16 @@ export component SettingsWindow inherits Window {
     in-out property <int> page: 0;
     // 分组图标选择浮层
     in-out property <bool> icon-picker-open: false;
+    // 桌宠页:0 已安装 / 1 发现更多(在线宠物库)
+    in-out property <int> pet-view: 0;
+    in property <[GalleryCardUi]> gallery-cards;
+    in property <string> gallery-status;
+    in property <string> gallery-page-label;
+    in-out property <string> gallery-query;
+    callback gallery-open;
+    callback gallery-search(string);
+    callback gallery-page(int);
+    callback gallery-install(int);
     // 分组名编辑态;切换/新建/删除分组时由 Rust refresh_settings 强制复位
     in-out property <bool> renaming: false;
 
@@ -597,41 +664,49 @@ export component SettingsWindow inherits Window {
         }
 
         // ================= 桌宠页 =================
-        if root.page == 1: ScrollView {
+        // 已安装 / 发现更多 是「选宠」的两个来源,同页切换
+        if root.page == 1: VerticalLayout {
             vertical-stretch: 1;
-            VerticalLayout {
-                padding: 24px;
-                spacing: 10px;
-                alignment: start;
+            padding: 24px;
+            padding-bottom: 0;
+            spacing: 12px;
 
-                HorizontalLayout {
-                    spacing: 12px;
-                    VerticalLayout {
-                        alignment: center;
-                        horizontal-stretch: 1;
-                        spacing: 2px;
-                        Text { text: "桌宠形象"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                        Text {
-                            text: "兼容 petdex 格式,扫描内置、~/.petdex/pets、~/.codex/pets 与自定义目录。";
-                            font-size: 12px;
-                            color: Theme.text-muted;
-                            wrap: word-wrap;
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        SegmentedRow {
-                            width: 168px;
-                            labels: ["小", "中", "大"];
-                            selected: root.pet-size-idx;
-                            changed(i) => { root.pet-size-changed(i); }
-                        }
+            HorizontalLayout {
+                spacing: 12px;
+                SegmentedPair {
+                    width: 240px;
+                    left-label: "已安装 (" + root.pets.length + ")";
+                    right-label: "发现更多";
+                    right-selected: root.pet-view == 1;
+                    changed(r) => {
+                        root.pet-view = r ? 1 : 0;
+                        if (r) { root.gallery-open(); }
                     }
                 }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "大小"; color: Theme.text-muted; font-size: 12.5px; vertical-alignment: center; }
+                SegmentedRow {
+                    width: 168px;
+                    labels: ["小", "中", "大"];
+                    selected: root.pet-size-idx;
+                    changed(i) => { root.pet-size-changed(i); }
+                }
+            }
 
-                // 宠物多行网格:每行 5 张(780 窗宽 - 48 padding 下第 6 张会截断)
+            // ---- 已安装 ----
+            if root.pet-view == 0: ScrollView {
+                vertical-stretch: 1;
                 VerticalLayout {
                     spacing: 10px;
+                    padding-bottom: 24px;
+                    alignment: start;
+                    Text {
+                        text: "兼容 petdex 格式,扫描内置、~/.petdex/pets、~/.codex/pets 与自定义目录。";
+                        font-size: 12px;
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                    }
+                    // 宠物多行网格:每行 5 张(780 窗宽 - 48 padding 下第 6 张会截断)
                     for rowidx in Math.ceil(root.pets.length / 5): HorizontalLayout {
                         spacing: 10px;
                         alignment: start;
@@ -640,25 +715,102 @@ export component SettingsWindow inherits Window {
                             clicked => { root.pet-selected(rowidx * 5 + colidx); }
                         }
                     }
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    GhostButton {
-                        text: root.custom-dir == "" ? "从文件夹添加宠物…" : "更换自定义目录…";
-                        icon: @image-url("icons/folder.svg");
-                        clicked => { root.pick-dir(); }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        GhostButton {
+                            text: root.custom-dir == "" ? "从文件夹添加宠物…" : "更换自定义目录…";
+                            icon: @image-url("icons/folder.svg");
+                            clicked => { root.pick-dir(); }
+                        }
+                        if root.custom-dir != "": GhostButton {
+                            text: "移除";
+                            clicked => { root.clear-dir(); }
+                        }
+                        Text {
+                            text: root.custom-dir;
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
                     }
-                    if root.custom-dir != "": GhostButton {
-                        text: "移除";
-                        clicked => { root.clear-dir(); }
+                }
+            }
+
+            // ---- 发现更多(petdex 在线宠物库) ----
+            if root.pet-view == 1: VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle {
+                        width: 260px;
+                        height: 32px;
+                        border-radius: 8px;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: gq.has-focus ? Theme.accent : #e2e8f0;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                Image { source: @image-url("icons/search.svg"); colorize: Theme.text-placeholder; width: 14px; height: 14px; }
+                            }
+                            Rectangle {
+                                clip: true;
+                                gq := TextInput {
+                                    text <=> root.gallery-query;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                    font-size: 12.5px;
+                                    color: Theme.text-primary;
+                                    changed text => { root.gallery-search(self.text); }
+                                }
+                                // 聚焦即隐藏:中文输入法组字期间 text 仍为空,占位会与组字文字重叠
+                                if gq.text == "" && !gq.has-focus: Text {
+                                    text: "搜索宠物名…";
+                                    color: Theme.text-placeholder;
+                                    font-size: 12.5px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
                     }
                     Text {
-                        text: root.custom-dir;
+                        text: root.gallery-status;
                         font-size: 12px;
                         color: Theme.text-muted;
                         vertical-alignment: center;
                         overflow: elide;
                         horizontal-stretch: 1;
+                    }
+                    // 分页放搜索行右侧:三行卡片已占满窗高,放底部会被挤出可视区
+                    GhostButton {
+                        text: "‹";
+                        clicked => { root.gallery-page(-1); }
+                    }
+                    Text { text: root.gallery-page-label; color: Theme.text-secondary; font-size: 12.5px; vertical-alignment: center; }
+                    GhostButton {
+                        text: "›";
+                        clicked => { root.gallery-page(1); }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        for rowidx in Math.ceil(root.gallery-cards.length / 5): HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            for colidx in Math.min(5, root.gallery-cards.length - rowidx * 5): GalleryCard {
+                                card: root.gallery-cards[rowidx * 5 + colidx];
+                                clicked => { root.gallery-install(rowidx * 5 + colidx); }
+                            }
+                        }
                     }
                 }
             }
