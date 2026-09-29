@@ -15,8 +15,8 @@ auto-launch = "0.5"
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 single-instance = "0.3"
-# 已在依赖树中(winit 等),直连只为二实例唤醒的具名事件
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security"] }
+# 已在依赖树中(winit 等),直连用于二实例唤醒的具名事件与重绘区域查询
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security", "Win32_Graphics_Gdi"] }
 
 [[bin]]
 name = "PetPhrase"

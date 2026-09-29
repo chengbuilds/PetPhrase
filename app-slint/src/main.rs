@@ -321,6 +321,28 @@ fn with_app(f: impl FnOnce(&Rc<App>)) {
     });
 }
 
+/// 本次重绘是不是 Windows 要求的(窗口有待重画的 update 区域)。
+/// Slint 1.17 软件渲染器只把「脏区」贴上窗口,而 softbuffer 在 Windows 上首帧之后一直报旧帧仍在屏;
+/// Windows 丢弃窗口画面(隐藏后重显、最小化还原、改 DPI、长时间遮挡)时 Slint 没有东西脏,
+/// 一个像素都不画,窗口停在系统纯白底——设置窗重开空白即此。winit 在 WM_PAINT 里先发
+/// RedrawRequested 再 DefWindowProc,此时 update 区域还在;Slint 自己请求的重绘不带区域。
+/// ponytail: 上游 slint-ui/slint#13568 已修(同一原理)但未发版,升级到含该修复的 Slint 后删掉这层
+fn os_invalidated(win: &slint::Window) -> bool {
+    use windows_sys::Win32::Graphics::Gdi::GetUpdateRect;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    win.with_winit_window(|w: &winit::window::Window| {
+        let Ok(handle) = w.window_handle() else {
+            return false;
+        };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return false;
+        };
+        // SAFETY: hwnd 来自存活中的 winit 窗口;只查询不擦除
+        unsafe { GetUpdateRect(h.hwnd.get() as _, std::ptr::null_mut(), 0) != 0 }
+    })
+    .unwrap_or(false)
+}
+
 /// 二实例唤醒:具名事件,第二实例 SetEvent 后退出,主实例后台线程等待即找回桌宠
 /// (取代旧的 wake.signal 文件 + 150ms 轮询)
 const WAKE_EVENT: &str = r"Local\PetPhraseWake";
@@ -493,6 +515,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     refresh_pet_sprite(&app);
     refresh_panel(&app);
     // refresh_settings 延迟到设置窗打开时:缩略图解码占 10+MB/宠,不该常驻
+
+    // 系统要求重绘时整窗标脏(见 os_invalidated);底层 filter 是替换语义,每窗只注册一次
+    {
+        let a = app.clone();
+        app.settings_win
+            .window()
+            .on_winit_window_event(move |w, event| {
+                if matches!(event, winit::event::WindowEvent::RedrawRequested) && os_invalidated(w)
+                {
+                    a.settings_win
+                        .set_repaint_flip(!a.settings_win.get_repaint_flip());
+                }
+                slint::winit_030::EventResult::Propagate
+            });
+    }
 
     // 设置窗关闭 → 释放缩略图缓存与模型;常驻面板若因设置暂隐则恢复
     {
@@ -914,8 +951,12 @@ fn wire_panel(app: &Rc<App>) {
     // 失焦即隐:仅在拿到过焦点后才生效,防 show 初期的 Focused(false)。
     // 底层 filter 是替换语义,注册一次即可,放这儿免得每次 show_panel 重复注册
     let a = app.clone();
-    app.panel.window().on_winit_window_event(move |_, event| {
+    app.panel.window().on_winit_window_event(move |w, event| {
         match event {
+            // 系统要求重绘时整窗标脏(见 os_invalidated)
+            winit::event::WindowEvent::RedrawRequested if os_invalidated(w) => {
+                a.panel.set_repaint_flip(!a.panel.get_repaint_flip());
+            }
             winit::event::WindowEvent::Focused(true) => {
                 a.state.borrow_mut().panel_got_focus = true;
             }
