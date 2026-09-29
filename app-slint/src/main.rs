@@ -262,10 +262,6 @@ struct State {
     idle_ms: u32,
     next_special: u32,
     last_frame_ms: u32,
-    /// 拖动中:Some(RunLeft/RunRight) = 正在移动的方向;None = 未拖或按住不动
-    dragging: bool,
-    drag_run: Option<PetState>,
-    drag_x: i32,
 }
 
 struct App {
@@ -280,8 +276,6 @@ struct App {
     /// 帧定时器:每帧时长不同,单发链式续约
     frame_timer: slint::Timer,
     msg_timer: slint::Timer,
-    /// 拖动中停手检测:一段时间无 Moved 即视为按住不动,停止跑步
-    drag_timer: slint::Timer,
 }
 
 // 后台线程结果经 invoke_from_event_loop 回主线程时取 App:
@@ -421,9 +415,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             idle_ms: 0,
             next_special: rand_idle_ms(),
             last_frame_ms: 0,
-            dragging: false,
-            drag_run: None,
-            drag_x: 0,
         }),
         hide_timer: slint::Timer::default(),
         move_timer: slint::Timer::default(),
@@ -431,7 +422,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         undo_timer: slint::Timer::default(),
         frame_timer: slint::Timer::default(),
         msg_timer: slint::Timer::default(),
-        drag_timer: slint::Timer::default(),
     });
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -593,11 +583,6 @@ fn wire_pet(app: &Rc<App>) {
 
     let a = app.clone();
     app.pet.on_drag_start(move || {
-        {
-            let mut st = a.state.borrow_mut();
-            st.dragging = true;
-            st.drag_x = a.pet.window().position().x;
-        }
         a.pet
             .window()
             .with_winit_window(|w: &winit::window::Window| {
@@ -605,23 +590,10 @@ fn wire_pet(app: &Rc<App>) {
             });
     });
 
-    // 系统拖窗结束后 Slint 仍会收到松手的 click,pet.slint 据此发 drag-end
-    let a = app.clone();
-    app.pet.on_drag_end(move || {
-        a.drag_timer.stop();
-        {
-            let mut st = a.state.borrow_mut();
-            st.dragging = false;
-            st.drag_run = None;
-        }
-        update_pet_base(&a);
-    });
-
     // 拖完保存位置(去抖 500ms);常驻开启时面板实时跟随
     let a = app.clone();
     app.pet.window().on_winit_window_event(move |_, event| {
         if let winit::event::WindowEvent::Moved(pos) = event {
-            on_pet_dragged(&a, pos.x);
             if a.panel.get_pinned() && a.panel.window().is_visible() {
                 if let Some(p) = compute_panel_placement(&a) {
                     a.panel
@@ -644,45 +616,18 @@ fn wire_pet(app: &Rc<App>) {
     });
 }
 
-/// 持续情境 → 动画 base:拖动跑步 > 编辑审阅 > 面板等待 > 闲置。
+/// 持续情境 → 动画 base:编辑审阅 > 面板等待 > 闲置。
 /// 面板显隐/编辑器开关/拖动状态变化后调用,情境只在这里判定
 fn update_pet_base(app: &Rc<App>) {
     let panel_open = app.panel.window().is_visible();
-    let base = match app.state.borrow().drag_run {
-        Some(run) => run,
-        None if panel_open && app.panel.get_editor_open() => PetState::Review,
-        None if panel_open => PetState::Waiting,
-        None => PetState::Idle,
+    let base = if panel_open && app.panel.get_editor_open() {
+        PetState::Review
+    } else if panel_open {
+        PetState::Waiting
+    } else {
+        PetState::Idle
     };
     app.state.borrow_mut().animator.set_base(base);
-}
-
-/// 拖动中按水平位移方向播左/右跑;程序移窗(缩放/钳制/面板跟随)不在拖动态,不触发
-fn on_pet_dragged(app: &Rc<App>, x: i32) {
-    let run = {
-        let mut st = app.state.borrow_mut();
-        if !st.dragging {
-            return;
-        }
-        let dx = x - st.drag_x;
-        st.drag_x = x;
-        match dx {
-            d if d > 0 => PetState::RunRight,
-            d if d < 0 => PetState::RunLeft,
-            _ => return,
-        }
-    };
-    app.state.borrow_mut().drag_run = Some(run);
-    update_pet_base(app);
-    let a = app.clone();
-    app.drag_timer.start(
-        slint::TimerMode::SingleShot,
-        Duration::from_millis(250),
-        move || {
-            a.state.borrow_mut().drag_run = None;
-            update_pet_base(&a);
-        },
-    );
 }
 
 /// 解码雪碧图并识别图集几何;失败(文件损坏/非图片)返回 None
