@@ -12,7 +12,6 @@ export component PetWindow inherits Window {
     in property <bool> missing: false;
     callback pet-clicked;
     callback drag-start;
-    callback drag-end;
 
     no-frame: true;
     always-on-top: true;
@@ -69,7 +68,6 @@ export component PetWindow inherits Window {
         clicked => {
             if (root.dragged) {
                 root.dragged = false;
-                root.drag-end();
             } else {
                 root.pet-clicked();
             }
