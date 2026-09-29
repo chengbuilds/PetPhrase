@@ -239,6 +239,8 @@ const UNDO_SECS: u64 = 3;
 /// 设置窗确认框待执行动作(泛化:同一个框服务多种危险操作)
 enum ConfirmAction {
     DeleteGroup,
+    /// 删除已安装桌宠(宠物 id = 包目录名)
+    DeletePet(String),
     /// 已读入并校验通过的导入数据,确认后快照+覆盖
     ImportReplace(storage::PhraseData),
 }
@@ -1304,6 +1306,7 @@ fn refresh_pet_cards(app: &Rc<App>) {
             slint::Image::default()
         };
         cards.push(PetCardUi {
+            removable: is_removable(p),
             name: p.name.clone().into(),
             err: p.error.clone().unwrap_or_default().into(),
             selected: p.id == selected_pet,
@@ -1427,6 +1430,7 @@ fn wire_settings(app: &Rc<App>) {
                 let gi = a.state.borrow().active_group;
                 delete_group(&a, gi);
             }
+            Some(ConfirmAction::DeletePet(id)) => delete_pet(&a, &id),
             Some(ConfirmAction::ImportReplace(data)) => apply_import(&a, data),
             None => {}
         }
@@ -1509,6 +1513,28 @@ fn wire_settings(app: &Rc<App>) {
         if let Some(id) = id {
             select_pet(&a, &id);
         }
+    });
+
+    let a = app.clone();
+    app.settings_win.on_pet_delete(move |i| {
+        let Some((id, name)) = a
+            .state
+            .borrow()
+            .pets
+            .get(i as usize)
+            .filter(|p| is_removable(p))
+            .map(|p| (p.id.clone(), p.name.clone()))
+        else {
+            return;
+        };
+        a.state.borrow_mut().confirm_action = Some(ConfirmAction::DeletePet(id));
+        a.settings_win.set_confirm_kind(0);
+        a.settings_win.set_confirm_action_label("删除".into());
+        a.settings_win.set_confirm_title("删除桌宠".into());
+        a.settings_win.set_confirm_msg(
+            format!("将从 ~/.petdex/pets 与 ~/.codex/pets 删除「{name}」的文件(Codex 中也将不再可用),此操作不可撤销。可在「发现更多」重新安装。").into(),
+        );
+        a.settings_win.set_confirm_visible(true);
     });
 
     let a = app.clone();
@@ -1729,6 +1755,51 @@ fn select_pet(app: &Rc<App>, id: &str) -> bool {
     refresh_pet_cards(app);
     refresh_gallery(app);
     true
+}
+
+/// 只允许删装在 petdex 标准目录里的包;内置宠与用户自定义目录里的文件不归我们管
+fn is_removable(p: &PetInfo) -> bool {
+    p.dir
+        .parent()
+        .is_some_and(|parent| petdex_install_roots().iter().any(|r| r == parent))
+}
+
+/// 两个标准目录里同名包一并删(CLI/宠物库都是双写);删的是当前宠则切到第一只可用宠
+fn delete_pet(app: &Rc<App>, id: &str) {
+    if id.is_empty() || id.contains(['/', '\\']) || id == ".." {
+        return;
+    }
+    let mut err = None;
+    for root in petdex_install_roots() {
+        let dir = root.join(id);
+        if dir.is_dir() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                err = Some(format!("{}:{e}", dir.display()));
+            }
+        }
+    }
+    refresh_pets(app);
+    let was_current = app.state.borrow().settings.pet_id == id;
+    if was_current {
+        let next = app
+            .state
+            .borrow()
+            .pets
+            .iter()
+            .find(|p| p.error.is_none())
+            .map(|p| p.id.clone());
+        if let Some(next) = next {
+            select_pet(app, &next);
+        } else {
+            refresh_pet_sprite(app); // 一只不剩:显示缺失占位
+        }
+    }
+    refresh_pet_cards(app);
+    refresh_gallery(app);
+    match err {
+        Some(e) => set_data_msg(app, &format!("⚠ 删除失败:{e}"), true),
+        None => set_data_msg(app, "已删除 ✓", false),
+    }
 }
 
 /* ================= 在线宠物库 ================= */
