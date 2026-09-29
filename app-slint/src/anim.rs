@@ -10,7 +10,6 @@ const COLUMNS: u32 = 8;
 const ANIM_ROWS: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // RunRight/RunLeft 由拖动交互接入(feat/pet-anim-interact)
 pub enum PetState {
     Idle,
     RunRight,
@@ -116,8 +115,11 @@ impl Atlas {
     }
 }
 
+/// 两层状态:base 是持续情境(闲置/等待/审阅/拖动跑步)的循环动画,
+/// play_once 的一次性动作(挥手/失败/彩蛋)播完回到 base
 pub struct Animator {
     rows: u32,
+    base: PetState,
     state: PetState,
     once: bool,
     frame: usize,
@@ -127,21 +129,35 @@ impl Animator {
     pub fn new(anim_rows: u32) -> Self {
         Animator {
             rows: anim_rows,
+            base: PetState::Idle,
             state: PetState::Idle,
             once: false,
             frame: 0,
         }
     }
 
-    /// once = 播一轮回 idle;否则循环到下次 play
-    pub fn play(&mut self, state: PetState, once: bool) {
+    /// 一次性动作:播一轮回到 base
+    pub fn play_once(&mut self, state: PetState) {
         self.state = state;
-        self.once = once && state != PetState::Idle;
+        self.once = true;
         self.frame = 0;
     }
 
-    pub fn state(&self) -> PetState {
-        self.state
+    /// 切换持续情境;正在播一次性动作时不打断,播完自然落到新 base
+    pub fn set_base(&mut self, base: PetState) {
+        if self.base == base {
+            return;
+        }
+        self.base = base;
+        if !self.once {
+            self.state = base;
+            self.frame = 0;
+        }
+    }
+
+    /// 纯闲置(无情境、无一次性动作)时才允许插彩蛋
+    pub fn is_resting(&self) -> bool {
+        !self.once && self.state == PetState::Idle
     }
 
     pub fn rows(&self) -> u32 {
@@ -162,7 +178,7 @@ impl Animator {
         if self.frame >= durs.len() {
             self.frame = 0;
             if self.once {
-                self.state = PetState::Idle;
+                self.state = self.base;
                 self.once = false;
             }
         }
@@ -244,7 +260,7 @@ mod tests {
     #[test]
     fn wave_plays_row3_four_frames_then_idle() {
         let mut a = Animator::new(9);
-        a.play(PetState::Wave, true);
+        a.play_once(PetState::Wave);
         let durs: Vec<u32> = (0..4)
             .map(|i| {
                 let (row, col, d) = a.step();
@@ -257,19 +273,29 @@ mod tests {
     }
 
     #[test]
-    fn looping_state_repeats() {
+    fn base_loops_and_once_returns_to_base() {
         let mut a = Animator::new(9);
-        a.play(PetState::RunLeft, false);
-        for _ in 0..8 {
+        a.set_base(PetState::Waiting);
+        for _ in 0..6 {
             a.step();
         }
-        assert_eq!(a.step().0, 2, "循环播放不回 idle");
+        assert_eq!(a.step().0, 6, "base 循环播放");
+        a.play_once(PetState::Wave);
+        a.set_base(PetState::Review); // 一次性动作中途换情境不打断
+        assert_eq!(a.step().0, 3);
+        for _ in 0..3 {
+            a.step();
+        }
+        assert_eq!(a.step().0, 8, "挥手播完落到新 base");
+        assert!(!a.is_resting());
+        a.set_base(PetState::Idle);
+        assert!(a.is_resting());
     }
 
     #[test]
     fn missing_rows_fall_back_to_idle_row() {
         let mut a = Animator::new(1);
-        a.play(PetState::Wave, true);
+        a.play_once(PetState::Wave);
         assert_eq!(a.step().0, 0);
     }
 
