@@ -55,8 +55,17 @@ export struct PhraseRowUi {
     display: string,
 }
 
+/// 宠物库卡片;status 0 可安装 / 1 安装中 / 2 已安装 / 3 使用中
+export struct GalleryCardUi {
+    name: string,
+    thumb: image,
+    status: int,
+}
+
 export struct PetCardUi {
     name: string,
+    /// 装在 petdex 标准目录里的才可删(内置/自定义目录不给删)
+    removable: bool,
     err: string,
     selected: bool,
     thumb: image,
