@@ -121,7 +121,12 @@ impl Ctx {
 /// 当前分组的混排布局(连续短句成气泡流,长句独占卡片)。
 /// by_use = 按 use_count 降序展示(稳定排序,同频保持手动序);phrase_idx 始终指向原始下标,
 /// 编辑/删除回源数据不受展示顺序影响。
-pub fn layout_group(data: &PhraseData, group_idx: usize, avail_w: f32, by_use: bool) -> Vec<LaidItem> {
+pub fn layout_group(
+    data: &PhraseData,
+    group_idx: usize,
+    avail_w: f32,
+    by_use: bool,
+) -> Vec<LaidItem> {
     let mut ctx = Ctx::new(avail_w);
     let Some(group) = data.groups.get(group_idx) else {
         return ctx.items;
