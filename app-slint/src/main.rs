@@ -335,6 +335,13 @@ struct GalleryState {
     token: u64,
 }
 
+impl GalleryState {
+    /// 当前筛选结果的总页数(至少 1 页,空结果也显示「1/1」)
+    fn pages(&self) -> usize {
+        self.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1)
+    }
+}
+
 struct App {
     pet: PetWindow,
     panel: PanelWindow,
@@ -807,11 +814,7 @@ fn try_load_sheet(path: &str) -> Option<(slint::Image, anim::Atlas)> {
 fn refresh_pet_sprite(app: &Rc<App>) {
     let candidates: Vec<String> = {
         let st = app.state.borrow();
-        let selected = st
-            .pets
-            .iter()
-            .find(|p| p.id == st.settings.pet_id && p.error.is_none());
-        selected
+        pet_loader::find_usable(&st.pets, &st.settings.pet_id)
             .into_iter()
             .chain(st.pets.iter().filter(|p| p.error.is_none()))
             .map(|p| p.spritesheet.clone())
@@ -1741,7 +1744,7 @@ fn wire_settings(app: &Rc<App>) {
     let a = app.clone();
     app.settings_win.on_gallery_page(move |delta| {
         if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
-            let pages = g.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1);
+            let pages = g.pages();
             g.page = (g.page as i32 + delta).clamp(0, pages as i32 - 1) as usize;
         }
         refresh_gallery(&a);
@@ -1941,9 +1944,7 @@ fn wire_settings(app: &Rc<App>) {
 fn select_pet(app: &Rc<App>, id: &str) -> Result<(), String> {
     let path = {
         let st = app.state.borrow();
-        st.pets
-            .iter()
-            .find(|p| p.id == id && p.error.is_none())
+        pet_loader::find_usable(&st.pets, id)
             .map(|p| p.spritesheet.clone())
             .ok_or("该宠物已不可用")?
     };
@@ -2082,7 +2083,7 @@ fn refresh_gallery(app: &Rc<App>) {
         if g.loading {
             return;
         }
-        let pages = g.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1);
+        let pages = g.pages();
         g.page = g.page.min(pages - 1);
         let on_page: Vec<gallery::RemotePet> = g
             .filtered
@@ -2096,11 +2097,7 @@ fn refresh_gallery(app: &Rc<App>) {
             .map(|p| {
                 let status = if st.settings.pet_id == p.slug {
                     GalleryStatus::Active
-                } else if st
-                    .pets
-                    .iter()
-                    .any(|lp| lp.id == p.slug && lp.error.is_none())
-                {
+                } else if pet_loader::find_usable(&st.pets, &p.slug).is_some() {
                     GalleryStatus::Installed
                 } else if st.installing.contains(&p.slug) {
                     GalleryStatus::Installing
@@ -2194,12 +2191,7 @@ fn gallery_install(app: &Rc<App>, idx: usize) {
             None => return,
         }
     };
-    let installed = app
-        .state
-        .borrow()
-        .pets
-        .iter()
-        .any(|p| p.id == pet.slug && p.error.is_none());
+    let installed = pet_loader::find_usable(&app.state.borrow().pets, &pet.slug).is_some();
     if installed {
         if let Err(e) = select_pet(app, &pet.slug) {
             set_data_msg(app, &format!("⚠ {e}"), true);

@@ -71,6 +71,11 @@ fn load_pet(dir: &Path) -> Option<PetInfo> {
     })
 }
 
+/// 按 id 找可用(无错误)的宠物
+pub fn find_usable<'a>(pets: &'a [PetInfo], id: &str) -> Option<&'a PetInfo> {
+    pets.iter().find(|p| p.id == id && p.error.is_none())
+}
+
 /// 解码雪碧图并裁出 idle 首帧作缩略图;解码失败返回 None。
 /// 整张 RGBA 约 11.5MB/宠,只在此函数栈上短暂存在;返回的单帧 ~160KB,可安全常驻缓存。
 /// 返回像素缓冲(Send)而非 slint::Image:在后台线程调用,回 UI 线程再包成 Image
