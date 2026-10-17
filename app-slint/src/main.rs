@@ -171,12 +171,15 @@ fn delete_phrase(app: &Rc<App>, gi: usize, pi: usize) {
     }
 }
 
-fn delete_group(app: &Rc<App>, gi: usize) {
+/// 按 id 删分组:确认框开着时当前分组可能已被面板切走,下标不能当目标
+fn delete_group(app: &Rc<App>, id: &str) {
     let removed = {
         let mut st = app.state.borrow_mut();
-        (gi < st.data.groups.len()).then(|| st.data.groups.remove(gi))
+        st.data
+            .group_pos(id)
+            .map(|gi| (gi, st.data.groups.remove(gi)))
     };
-    let Some(g) = removed else {
+    let Some((gi, g)) = removed else {
         return;
     };
     offer_undo(app, Deleted::Group(gi, g));
@@ -236,14 +239,41 @@ enum Deleted {
 
 /// 撤销窗口:足够点到横幅,又不至于挡着后续操作
 const UNDO_SECS: u64 = 3;
+/// 自动检查更新:启动后首查延迟、此后重查间隔(设置页说明文字也由此生成)
+const UPDATE_FIRST_CHECK_SECS: u64 = 10;
+const UPDATE_RECHECK_HOURS: u64 = 24;
 
-/// 设置窗确认框待执行动作(泛化:同一个框服务多种危险操作)
+/// 设置窗确认框待执行动作(泛化:同一个框服务多种危险操作)。
+/// 目标一律随动作存下:确认框开着时界面状态(如当前分组)可能已变
 enum ConfirmAction {
-    DeleteGroup,
+    /// 删除分组(分组 id)
+    DeleteGroup(String),
     /// 删除已安装桌宠(宠物 id = 包目录名)
     DeletePet(String),
     /// 已读入并校验通过的导入数据,确认后快照+覆盖
     ImportReplace(storage::PhraseData),
+}
+
+impl ConfirmAction {
+    /// (框样式, 标题, 确认按钮文案)
+    fn dialog(&self) -> (ConfirmKind, &'static str, &'static str) {
+        match self {
+            ConfirmAction::DeleteGroup(_) => (ConfirmKind::Danger, "删除分组", "删除"),
+            ConfirmAction::DeletePet(_) => (ConfirmKind::Danger, "删除桌宠", "删除"),
+            ConfirmAction::ImportReplace(_) => (ConfirmKind::Replace, "导入并替换", "替换导入"),
+        }
+    }
+}
+
+/// 弹确认框;标题/样式/按钮由动作决定,确认时执行 on_confirm_ok
+fn ask_confirm(app: &Rc<App>, action: ConfirmAction, msg: String) {
+    let (kind, title, label) = action.dialog();
+    app.state.borrow_mut().confirm_action = Some(action);
+    app.settings_win.set_confirm_kind(kind);
+    app.settings_win.set_confirm_title(title.into());
+    app.settings_win.set_confirm_action_label(label.into());
+    app.settings_win.set_confirm_msg(msg.into());
+    app.settings_win.set_confirm_visible(true);
 }
 
 struct State {
@@ -280,15 +310,19 @@ struct State {
     last_frame_ms: u32,
     /// 在线宠物库(设置窗「发现更多」打开时加载,关窗即释放)
     gallery: Option<GalleryState>,
+    /// 安装中的宠物 slug。安装线程比设置窗活得久,放进随关窗释放的 GalleryState 会丢:
+    /// 关窗重开后同一只能再装一次,两个线程共用临时目录互相删文件
+    installing: HashSet<String>,
 }
 
-/// 托盘图标与菜单一起建、一起 drop(drop 即移除图标)
+/// 托盘图标与菜单一起建、一起 drop(drop 即移除图标);菜单项按名字认,不靠下标
 struct Tray {
     _icon: tray_icon::TrayIcon,
-    /// 菜单项 id,下标即 on_tray_menu 的动作序号
-    ids: [tray_icon::menu::MenuId; 4],
-    /// 「检查更新」项,发现新版后改文案
-    update_item: tray_icon::menu::MenuItem,
+    toggle: tray_icon::menu::MenuItem,
+    settings: tray_icon::menu::MenuItem,
+    /// 「检查更新」,发现新版后改文案
+    update: tray_icon::menu::MenuItem,
+    quit: tray_icon::menu::MenuItem,
 }
 
 #[derive(Default)]
@@ -298,11 +332,17 @@ struct GalleryState {
     filtered: Vec<usize>,
     page: usize,
     thumbs: HashMap<String, slint::Image>,
-    /// 已尝试过拉缩略图的 slug(失败的不反复重试)
+    /// 已尝试过拉缩略图的 slug(个别缺图的不反复重试;整批失败会撤回,见 refresh_gallery)
     thumb_tried: HashSet<String>,
-    installing: HashSet<String>,
     /// 关窗/重开后,旧的后台结果据此丢弃
     token: u64,
+}
+
+impl GalleryState {
+    /// 当前筛选结果的总页数(至少 1 页,空结果也显示「1/1」)
+    fn pages(&self) -> usize {
+        self.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1)
+    }
 }
 
 struct App {
@@ -449,8 +489,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let active_group = settings
         .last_group
-        .as_ref()
-        .and_then(|id| data.groups.iter().position(|g| &g.id == id))
+        .as_deref()
+        .and_then(|id| data.group_pos(id))
         .unwrap_or(0);
 
     let app = Rc::new(App {
@@ -480,6 +520,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             next_special: rand_idle_ms(),
             last_frame_ms: 0,
             gallery: None,
+            installing: HashSet::new(),
         }),
         hide_timer: slint::Timer::default(),
         move_timer: slint::Timer::default(),
@@ -500,13 +541,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     schedule_frame(&app, 0);
     wire_tray_events();
 
-    // 启动 10s 后静默检查一次更新;此后每 24h 重查一次
+    // 启动后静默检查一次更新,此后定期重查
     // (开机自启用户一挂数周,只查启动那一次等于永远不查)
     {
         let a = app.clone();
         app.update_timer.start(
             slint::TimerMode::SingleShot,
-            Duration::from_secs(10),
+            Duration::from_secs(UPDATE_FIRST_CHECK_SECS),
             move || {
                 if a.state.borrow().settings.auto_check_update {
                     start_update_check(&a, false);
@@ -514,7 +555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let a2 = a.clone();
                 a.update_timer.start(
                     slint::TimerMode::Repeated,
-                    Duration::from_secs(24 * 3600),
+                    Duration::from_secs(UPDATE_RECHECK_HOURS * 3600),
                     move || {
                         if a2.state.borrow().settings.auto_check_update {
                             start_update_check(&a2, false);
@@ -555,7 +596,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 st.gallery = None;
             }
             THUMB_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // 在跑的缩略图线程作废
-            a.settings_win.set_pet_view(0);
+            a.settings_win.set_pet_view(PetView::Installed);
             a.settings_win
                 .set_gallery_cards(ModelRc::new(VecModel::from(Vec::<GalleryCardUi>::new())));
             a.settings_win
@@ -751,7 +792,7 @@ fn wire_pet(app: &Rc<App>) {
 }
 
 /// 持续情境 → 动画 base:编辑审阅 > 面板等待 > 闲置。
-/// 面板显隐/编辑器开关/拖动状态变化后调用,情境只在这里判定
+/// 面板显隐/编辑器开关/换动画机后调用,情境只在这里判定
 fn update_pet_base(app: &Rc<App>) {
     let panel_open = app.panel.window().is_visible();
     let base = if panel_open && app.panel.get_editor_open() {
@@ -776,29 +817,30 @@ fn try_load_sheet(path: &str) -> Option<(slint::Image, anim::Atlas)> {
 fn refresh_pet_sprite(app: &Rc<App>) {
     let candidates: Vec<String> = {
         let st = app.state.borrow();
-        let selected = st
-            .pets
-            .iter()
-            .find(|p| p.id == st.settings.pet_id && p.error.is_none());
-        selected
+        pet_loader::find_usable(&st.pets, &st.settings.pet_id)
             .into_iter()
             .chain(st.pets.iter().filter(|p| p.error.is_none()))
             .map(|p| p.spritesheet.clone())
             .collect() // 选中宠在首位,可能重复一次,解码成功即返回无所谓
     };
     for path in &candidates {
-        if let Some((img, atlas)) = try_load_sheet(path) {
-            app.state.borrow_mut().animator = Animator::new(atlas.anim_rows());
-            update_pet_base(app); // 新动画机从 idle 起步,补回当前情境
-            app.pet.set_cell_w(atlas.cell_w as i32);
-            app.pet.set_cell_h(atlas.cell_h as i32);
-            app.pet.set_sheet(img);
-            app.pet.set_missing(false);
+        if let Some(sheet) = try_load_sheet(path) {
+            show_sheet(app, sheet);
             return;
         }
     }
     app.pet.set_missing(true);
     app.pet.set_sheet(slint::Image::default());
+}
+
+/// 把解码好的雪碧图装上桌宠(启动/回退/选宠共用)
+fn show_sheet(app: &Rc<App>, (img, atlas): (slint::Image, anim::Atlas)) {
+    app.state.borrow_mut().animator = Animator::new(atlas.anim_rows());
+    update_pet_base(app); // 新动画机从 idle 起步,补回当前情境
+    app.pet.set_cell_w(atlas.cell_w as i32);
+    app.pet.set_cell_h(atlas.cell_h as i32);
+    app.pet.set_sheet(img);
+    app.pet.set_missing(false);
 }
 
 /// 应用缩放并移窗,锚定底边中点——宠的「脚」原地不动。
@@ -860,19 +902,16 @@ fn schedule_frame(app: &Rc<App>, delay_ms: u32) {
 const LIST_AVAIL_W: f32 = logic::PANEL_W - logic::LIST_PAD * 2.0;
 
 fn refresh_panel(app: &Rc<App>) {
-    let (tabs, items, content_h, show_grid) = {
+    let (tabs, layout, show_grid) = {
         let st = app.state.borrow();
         let query = app.panel.get_search_text().to_string();
-        let items = if query.trim().is_empty() {
-            logic::layout_group(
-                &st.data,
-                st.active_group,
-                LIST_AVAIL_W,
-                st.settings.sort_by_use,
-            )
-        } else {
-            logic::layout_search(&st.data, &query, LIST_AVAIL_W)
-        };
+        let layout = logic::layout_panel(
+            &st.data,
+            st.active_group,
+            &query,
+            LIST_AVAIL_W,
+            st.settings.sort_by_use,
+        );
         let tabs: Vec<TabUi> = st
             .data
             .groups
@@ -885,12 +924,12 @@ fn refresh_panel(app: &Rc<App>) {
                 active: i == st.active_group,
             })
             .collect();
-        let h = logic::content_height(&items);
         let show_grid = st.data.groups.len() > 4;
-        (tabs, items, h, show_grid)
+        (tabs, layout, show_grid)
     };
 
-    let ui_items: Vec<PanelItemUi> = items
+    let ui_items: Vec<PanelItemUi> = layout
+        .items
         .iter()
         .map(|it| PanelItemUi {
             text: it.text.clone().into(),
@@ -902,11 +941,25 @@ fn refresh_panel(app: &Rc<App>) {
             is_chip: it.is_chip,
         })
         .collect();
+    // h = 0 即不显示
+    let add_row = layout
+        .add_row
+        .map_or_else(PanelItemUi::default, |r| PanelItemUi {
+            text: logic::ADD_LABEL.into(),
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+            is_chip: true,
+            ..Default::default()
+        });
 
-    app.state.borrow_mut().items = items;
+    app.state.borrow_mut().items = layout.items;
     app.panel.set_tabs(ModelRc::new(VecModel::from(tabs)));
     app.panel.set_items(ModelRc::new(VecModel::from(ui_items)));
-    app.panel.set_content_h(content_h);
+    app.panel.set_add_row(add_row);
+    app.panel.set_searching(layout.searching);
+    app.panel.set_list_h(layout.list_h);
     app.panel.set_show_grid_btn(show_grid);
     app.panel.set_copied_idx(-1);
     app.panel.set_failed_idx(-1);
@@ -1264,7 +1317,7 @@ fn show_panel(app: &Rc<App>) {
     app.panel.invoke_reset_scroll();
     refresh_panel(app);
     // 显示前按内容一次性定高,再按实际高度贴宠定位
-    let h = logic::panel_height(&app.state.borrow().items);
+    let h = logic::panel_height(app.panel.get_header_h(), app.panel.get_list_h());
     app.panel.set_panel_h(h);
     let Some(placement) = compute_panel_placement(app) else {
         dbg_log("show_panel: no placement (pet native window missing?)");
@@ -1304,11 +1357,16 @@ fn dbg_log(msg: &str) {
 
 fn hide_panel(app: &Rc<App>) {
     app.panel.set_grid_open(false);
+    app.panel.set_pinned(false); // 收起即解除常驻(点宠/Esc/图钉关,语义一致)
+    stash_panel(app);
+}
+
+/// 隐藏面板窗口的唯一收尾(hide_panel 与设置窗暂隐常驻面板共用):关右键菜单与编辑器、隐藏、刷宠物情境
+fn stash_panel(app: &Rc<App>) {
     app.panel.set_ctx_open(false);
     // 编辑器一并关+清目标:否则重开面板露出陈旧编辑器,期间数据变动过的话 pending_edit 下标错位会改错短语
     app.panel.set_editor_open(false);
     app.state.borrow_mut().pending_edit = None;
-    app.panel.set_pinned(false); // 收起即解除常驻(点宠/Esc/图钉关,语义一致)
     let _ = app.panel.window().hide();
     update_pet_base(app);
 }
@@ -1319,10 +1377,7 @@ fn open_settings(app: &Rc<App>) {
     // 常驻面板遇设置窗:暂隐(保留图钉),设置关闭后恢复
     if app.panel.get_pinned() && app.panel.window().is_visible() {
         app.state.borrow_mut().panel_resume_after_settings = true;
-        app.panel.set_ctx_open(false);
-        app.panel.set_editor_open(false);
-        let _ = app.panel.window().hide();
-        update_pet_base(app);
+        stash_panel(app);
     }
     // 先 show 再刷:refresh_pet_cards 只给可见的设置窗干活;同一轮回调内刷完才渲染,不会闪旧内容
     let _ = app.settings_win.show();
@@ -1547,12 +1602,12 @@ fn wire_settings(app: &Rc<App>) {
     // 删除分组:有短语才弹确认(几十上百条光靠 3s 撤销容易错过),空分组直接删;两者都可撤销
     let a = app.clone();
     app.settings_win.on_group_delete(move || {
-        let (gi, msg) = {
+        let (id, msg) = {
             let st = a.state.borrow();
             match st.data.groups.get(st.active_group) {
-                Some(g) if g.phrases.is_empty() => (st.active_group, None),
+                Some(g) if g.phrases.is_empty() => (g.id.clone(), None),
                 Some(g) => (
-                    st.active_group,
+                    g.id.clone(),
                     Some(format!(
                         "将删除「{}」及其中 {} 条常用语。删除后 {UNDO_SECS} 秒内可撤销。",
                         g.name,
@@ -1562,26 +1617,17 @@ fn wire_settings(app: &Rc<App>) {
                 None => return,
             }
         };
-        let Some(msg) = msg else {
-            delete_group(&a, gi);
-            return;
-        };
-        a.state.borrow_mut().confirm_action = Some(ConfirmAction::DeleteGroup);
-        a.settings_win.set_confirm_kind(0);
-        a.settings_win.set_confirm_action_label("删除".into());
-        a.settings_win.set_confirm_title("删除分组".into());
-        a.settings_win.set_confirm_msg(msg.into());
-        a.settings_win.set_confirm_visible(true);
+        match msg {
+            Some(msg) => ask_confirm(&a, ConfirmAction::DeleteGroup(id), msg),
+            None => delete_group(&a, &id),
+        }
     });
 
     let a = app.clone();
     app.settings_win.on_confirm_ok(move || {
         let action = a.state.borrow_mut().confirm_action.take();
         match action {
-            Some(ConfirmAction::DeleteGroup) => {
-                let gi = a.state.borrow().active_group;
-                delete_group(&a, gi);
-            }
+            Some(ConfirmAction::DeleteGroup(id)) => delete_group(&a, &id),
             Some(ConfirmAction::DeletePet(id)) => delete_pet(&a, &id),
             Some(ConfirmAction::ImportReplace(data)) => apply_import(&a, data),
             None => {}
@@ -1662,8 +1708,8 @@ fn wire_settings(app: &Rc<App>) {
     let a = app.clone();
     app.settings_win.on_pet_selected(move |i| {
         let id = a.state.borrow().pets.get(i as usize).map(|p| p.id.clone());
-        if let Some(id) = id {
-            select_pet(&a, &id);
+        if let Some(Err(e)) = id.map(|id| select_pet(&a, &id)) {
+            set_data_msg(&a, &format!("⚠ {e}"), true);
         }
     });
 
@@ -1679,14 +1725,11 @@ fn wire_settings(app: &Rc<App>) {
         else {
             return;
         };
-        a.state.borrow_mut().confirm_action = Some(ConfirmAction::DeletePet(id));
-        a.settings_win.set_confirm_kind(0);
-        a.settings_win.set_confirm_action_label("删除".into());
-        a.settings_win.set_confirm_title("删除桌宠".into());
-        a.settings_win.set_confirm_msg(
-            format!("将从 ~/.petdex/pets 与 ~/.codex/pets 删除「{name}」的文件(Codex 中也将不再可用),此操作不可撤销。可在「发现更多」重新安装。").into(),
+        ask_confirm(
+            &a,
+            ConfirmAction::DeletePet(id),
+            format!("将从 ~/.petdex/pets 与 ~/.codex/pets 删除「{name}」的文件(Codex 中也将不再可用),此操作不可撤销。可在「发现更多」重新安装。"),
         );
-        a.settings_win.set_confirm_visible(true);
     });
 
     let a = app.clone();
@@ -1704,7 +1747,7 @@ fn wire_settings(app: &Rc<App>) {
     let a = app.clone();
     app.settings_win.on_gallery_page(move |delta| {
         if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
-            let pages = g.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1);
+            let pages = g.pages();
             g.page = (g.page as i32 + delta).clamp(0, pages as i32 - 1) as usize;
         }
         refresh_gallery(&a);
@@ -1864,12 +1907,7 @@ fn wire_settings(app: &Rc<App>) {
             cur_g,
             cur_p
         );
-        a.state.borrow_mut().confirm_action = Some(ConfirmAction::ImportReplace(data));
-        a.settings_win.set_confirm_kind(1);
-        a.settings_win.set_confirm_action_label("替换导入".into());
-        a.settings_win.set_confirm_title("导入并替换".into());
-        a.settings_win.set_confirm_msg(msg.into());
-        a.settings_win.set_confirm_visible(true);
+        ask_confirm(&a, ConfirmAction::ImportReplace(data), msg);
     });
 
     // ---- 关于与更新 ----
@@ -1877,6 +1915,12 @@ fn wire_settings(app: &Rc<App>) {
         .set_app_version(updater::CURRENT_VERSION.into());
     app.settings_win
         .set_auto_check_on(app.state.borrow().settings.auto_check_update);
+    app.settings_win.set_auto_check_desc(
+        format!(
+            "启动 {UPDATE_FIRST_CHECK_SECS} 秒后检查一次,之后每 {UPDATE_RECHECK_HOURS} 小时一次"
+        )
+        .into(),
+    );
     app.settings_win
         .set_sort_by_use(app.state.borrow().settings.sort_by_use);
     app.settings_win
@@ -1903,30 +1947,23 @@ fn wire_settings(app: &Rc<App>) {
     }
 }
 
-/// 选宠唯一入口(本地卡片/宠物库「使用」/安装后自动切换共用)。
-/// 扫描期只验文件存在;真解码成功才落选择,否则设置显示已换、桌面还是旧宠
-fn select_pet(app: &Rc<App>, id: &str) -> bool {
-    let sheet = {
+/// 选宠唯一入口(本地卡片/宠物库「使用」/安装后自动切换/删除后回退共用)。
+/// 扫描期只验文件存在;真解码成功才落选择,否则设置显示已换、桌面还是旧宠。
+/// 解码结果直接装上桌宠,整张图只解码这一次;Err 为给用户看的原因
+fn select_pet(app: &Rc<App>, id: &str) -> Result<(), String> {
+    let path = {
         let st = app.state.borrow();
-        match st.pets.iter().find(|p| p.id == id && p.error.is_none()) {
-            Some(p) => p.spritesheet.clone(),
-            None => return false,
-        }
+        pet_loader::find_usable(&st.pets, id)
+            .map(|p| p.spritesheet.clone())
+            .ok_or("该宠物已不可用")?
     };
-    if try_load_sheet(&sheet).is_none() {
-        set_data_msg(
-            app,
-            "⚠ 该宠物雪碧图无法解码(文件损坏?),已保留当前选择",
-            true,
-        );
-        return false;
-    }
+    let sheet = try_load_sheet(&path).ok_or("该宠物雪碧图无法解码(文件损坏?),已保留当前选择")?;
     app.state.borrow_mut().settings.pet_id = id.to_string();
     persist_settings(app);
-    refresh_pet_sprite(app);
+    show_sheet(app, sheet);
     refresh_pet_cards(app);
     refresh_gallery(app);
-    true
+    Ok(())
 }
 
 /// 只允许删装在 petdex 标准目录里的包;内置宠与用户自定义目录里的文件不归我们管
@@ -1936,9 +1973,15 @@ fn is_removable(p: &PetInfo) -> bool {
         .is_some_and(|parent| petdex_install_roots().iter().any(|r| r == parent))
 }
 
-/// 两个标准目录里同名包一并删(CLI/宠物库都是双写);删的是当前宠则切到第一只可用宠
+/// id 只能是单个普通路径段:它要拼进 remove_dir_all 的路径,`.`/`..`/`C:`/带分隔符都会指到包目录之外
+fn is_plain_name(id: &str) -> bool {
+    let mut parts = std::path::Path::new(id).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+}
+
+/// 两个标准目录里同名包一并删(CLI/宠物库都是双写);删的是当前宠则换到第一只能加载的宠
 fn delete_pet(app: &Rc<App>, id: &str) {
-    if id.is_empty() || id.contains(['/', '\\']) || id == ".." {
+    if !is_plain_name(id) {
         return;
     }
     let mut err = None;
@@ -1952,36 +1995,31 @@ fn delete_pet(app: &Rc<App>, id: &str) {
     }
     refresh_pets(app);
     let was_current = app.state.borrow().settings.pet_id == id;
-    if was_current {
-        let next = app
-            .state
-            .borrow()
-            .pets
-            .iter()
-            .find(|p| p.error.is_none())
-            .map(|p| p.id.clone());
-        if let Some(next) = next {
-            select_pet(app, &next);
-        } else {
-            refresh_pet_sprite(app); // 一只不剩:显示缺失占位
+    // 按列表顺序逐只试,第一只解码成功的接任(select_pet 顺带刷卡片与宠物库)
+    let switched = was_current && {
+        let ids: Vec<String> = (app.state.borrow().pets.iter())
+            .filter(|p| p.error.is_none())
+            .map(|p| p.id.clone())
+            .collect();
+        ids.iter().any(|next| select_pet(app, next).is_ok())
+    };
+    if !switched {
+        if was_current {
+            refresh_pet_sprite(app); // 一只都换不上:显示缺失占位
         }
+        refresh_pet_cards(app);
+        refresh_gallery(app);
     }
-    refresh_pet_cards(app);
-    refresh_gallery(app);
     match err {
         Some(e) => set_data_msg(app, &format!("⚠ 删除失败:{e}"), true),
+        None if was_current && !switched => {
+            set_data_msg(app, "⚠ 已删除,但没有能加载的桌宠了", true)
+        }
         None => set_data_msg(app, "已删除 ✓", false),
     }
 }
 
 /* ================= 在线宠物库 ================= */
-
-fn thumb_cache_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| data_dir());
-    base.join("PetPhrase").join("thumbs")
-}
 
 /// 切到「发现更多」:首次进入后台拉 manifest;已加载则直接刷新
 fn open_gallery(app: &Rc<App>) {
@@ -2054,7 +2092,7 @@ fn refresh_gallery(app: &Rc<App>) {
         if g.loading {
             return;
         }
-        let pages = g.filtered.len().div_ceil(gallery::PAGE_SIZE).max(1);
+        let pages = g.pages();
         g.page = g.page.min(pages - 1);
         let on_page: Vec<gallery::RemotePet> = g
             .filtered
@@ -2067,17 +2105,13 @@ fn refresh_gallery(app: &Rc<App>) {
             .iter()
             .map(|p| {
                 let status = if st.settings.pet_id == p.slug {
-                    3
-                } else if st
-                    .pets
-                    .iter()
-                    .any(|lp| lp.id == p.slug && lp.error.is_none())
-                {
-                    2
-                } else if g.installing.contains(&p.slug) {
-                    1
+                    GalleryStatus::Active
+                } else if pet_loader::find_usable(&st.pets, &p.slug).is_some() {
+                    GalleryStatus::Installed
+                } else if st.installing.contains(&p.slug) {
+                    GalleryStatus::Installing
                 } else {
-                    0
+                    GalleryStatus::Installable
                 };
                 GalleryCardUi {
                     name: p.name.clone().into(),
@@ -2110,21 +2144,45 @@ fn refresh_gallery(app: &Rc<App>) {
         return;
     };
     std::thread::spawn(move || {
-        let files = gallery::fetch_thumbs(&need, &thumb_cache_dir());
+        let result = gallery::thumb_cache_dir(std::env::var_os("LOCALAPPDATA"))
+            .and_then(|dir| gallery::fetch_thumbs(&need, &dir));
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|a| {
-                {
+                let failed = {
                     let mut st = a.state.borrow_mut();
                     let Some(g) = st.gallery.as_mut().filter(|g| g.token == token) else {
                         return;
                     };
-                    for (slug, path) in files {
-                        if let Some(img) = gallery::load_thumb(&path) {
-                            g.thumbs.insert(slug, img);
+                    match result {
+                        Ok(files) => {
+                            for (slug, path) in files {
+                                match gallery::load_thumb(&path) {
+                                    Some(img) => {
+                                        g.thumbs.insert(slug, img);
+                                    }
+                                    // 解不开的缓存(如中途断网的半截文件)删掉,下次重拉;删不掉只是继续空着
+                                    None => {
+                                        let _ = std::fs::remove_file(&path);
+                                    }
+                                }
+                            }
+                            None
+                        }
+                        Err(e) => {
+                            // 整批没拉到:撤掉「已尝试」,翻页/重进时重试。这里不自动重刷,断网时会变成连环重试
+                            for p in &need {
+                                g.thumb_tried.remove(&p.slug);
+                            }
+                            Some(e)
                         }
                     }
+                };
+                match failed {
+                    None => refresh_gallery(a),
+                    Some(e) => a
+                        .settings_win
+                        .set_gallery_status(format!("⚠ {e},翻页或稍后重试").into()),
                 }
-                refresh_gallery(a);
             });
         });
     });
@@ -2142,38 +2200,30 @@ fn gallery_install(app: &Rc<App>, idx: usize) {
             None => return,
         }
     };
-    let installed = app
-        .state
-        .borrow()
-        .pets
-        .iter()
-        .any(|p| p.id == pet.slug && p.error.is_none());
+    let installed = pet_loader::find_usable(&app.state.borrow().pets, &pet.slug).is_some();
     if installed {
-        select_pet(app, &pet.slug);
+        if let Err(e) = select_pet(app, &pet.slug) {
+            set_data_msg(app, &format!("⚠ {e}"), true);
+        }
         return;
     }
-    {
-        let mut st = app.state.borrow_mut();
-        let Some(g) = st.gallery.as_mut() else {
-            return;
-        };
-        if !g.installing.insert(pet.slug.clone()) {
-            return; // 已在安装中
-        }
+    if !app.state.borrow_mut().installing.insert(pet.slug.clone()) {
+        return; // 已在安装中
     }
     refresh_gallery(app);
     std::thread::spawn(move || {
         let result = gallery::install(&pet, &petdex_install_roots());
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|a| {
-                if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
-                    g.installing.remove(&pet.slug);
-                }
+                a.state.borrow_mut().installing.remove(&pet.slug);
                 match result {
                     Ok(()) => {
                         refresh_pets(a);
-                        if select_pet(a, &pet.slug) {
-                            set_data_msg(a, &format!("已安装并切换到「{}」✓", pet.name), false);
+                        match select_pet(a, &pet.slug) {
+                            Ok(()) => {
+                                set_data_msg(a, &format!("已安装并切换到「{}」✓", pet.name), false)
+                            }
+                            Err(e) => set_data_msg(a, &format!("⚠ {e}"), true),
                         }
                     }
                     Err(e) => {
@@ -2268,10 +2318,8 @@ fn start_update_install(app: &Rc<App>) {
                         return;
                     }
                 };
-                // 与托盘退出同款:位置保存有 500ms 去抖,退出前无条件落一次盘
-                let pos = a.pet.window().position();
-                a.state.borrow_mut().settings.pet_pos = Some((pos.x, pos.y));
-                persist_settings(a);
+                // 安装器一起来就 taskkill 本进程,位置必须在起安装器之前落盘
+                save_pet_pos(a);
                 match updater::launch_installer(path) {
                     Ok(()) => {
                         let _ = slint::quit_event_loop();
@@ -2308,14 +2356,10 @@ fn setup_tray(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
     let icon = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h)?;
 
     let toggle = MenuItem::new("显示/隐藏宠物", true, None);
-    let settings_item = MenuItem::new("设置", true, None);
-    let update_item = MenuItem::new("检查更新", true, None);
+    let settings = MenuItem::new("设置", true, None);
+    let update = MenuItem::new("检查更新", true, None);
     let quit = MenuItem::new("退出", true, None);
-    let menu = Menu::new();
-    menu.append(&toggle)?;
-    menu.append(&settings_item)?;
-    menu.append(&update_item)?;
-    menu.append(&quit)?;
+    let menu = Menu::with_items(&[&toggle, &settings, &update, &quit])?;
 
     let icon = tray_icon::TrayIconBuilder::new()
         .with_icon(icon)
@@ -2325,42 +2369,63 @@ fn setup_tray(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
         .with_menu_on_left_click(false)
         .build()?;
 
-    let ids = [
-        toggle.id().clone(),
-        settings_item.id().clone(),
-        update_item.id().clone(),
-        quit.id().clone(),
-    ];
     app.state.borrow_mut().tray = Some(Tray {
         _icon: icon,
-        ids,
-        update_item,
+        toggle,
+        settings,
+        update,
+        quit,
     });
     sync_update_menu(app); // 托盘重建时恢复「升级到 vX」文案
     Ok(())
 }
 
 /// 托盘事件处理器全程只注册一次:tray-icon/muda 的 set_event_handler 存在全局 OnceCell 里,
-/// 再次注册被静默丢弃(托盘重建后菜单全失灵即此)。处理器只转发 id,动作按当前 Tray 的 ids 现查。
+/// 再次注册被静默丢弃(托盘重建后菜单全失灵即此)。处理器只转发 id,动作按当前 Tray 的菜单项现认。
 /// 回调在 Win32 消息过程里同步触发,统一 invoke_from_event_loop 延后执行,避开与正在进行的 RefCell 借用重入
 fn wire_tray_events() {
+    static AFTER_DOUBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     tray_icon::TrayIconEvent::set_event_handler(Some(|ev: tray_icon::TrayIconEvent| {
         if !matches!(ev, tray_icon::TrayIconEvent::Move { .. }) {
             dbg_log(&format!("tray event {ev:?}"));
         }
         // 托盘图标左键单击 = 显示/隐藏宠物(同菜单首项;菜单只挂在右键)
-        if let tray_icon::TrayIconEvent::Click {
-            button: tray_icon::MouseButton::Left,
-            button_state: tray_icon::MouseButtonState::Up,
-            ..
-        } = ev
-        {
+        if tray_toggle_wanted(&ev, &AFTER_DOUBLE) {
             let _ = slint::invoke_from_event_loop(|| with_app(toggle_pet));
         }
     }));
     tray_icon::menu::MenuEvent::set_event_handler(Some(|ev: tray_icon::menu::MenuEvent| {
         let _ = slint::invoke_from_event_loop(move || with_app(|a| on_tray_menu(a, &ev.id)));
     }));
+}
+
+/// 这次托盘事件该不该切换宠物显隐。Windows 把左键双击报成「Down、Up、DoubleClick、Up」:
+/// 第二个 Up 属于同一次双击,要跳过,否则双击 = 隐藏再显示、宠物闪一下。
+/// 新的 Down 清掉标记,防止丢了第二个 Up 时吞掉下一次单击
+fn tray_toggle_wanted(
+    ev: &tray_icon::TrayIconEvent,
+    after_double: &std::sync::atomic::AtomicBool,
+) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    use tray_icon::{MouseButton::Left, MouseButtonState, TrayIconEvent};
+    match ev {
+        TrayIconEvent::DoubleClick { button: Left, .. } => {
+            after_double.store(true, Relaxed);
+            false
+        }
+        TrayIconEvent::Click {
+            button: Left,
+            button_state,
+            ..
+        } => match button_state {
+            MouseButtonState::Down => {
+                after_double.store(false, Relaxed);
+                false
+            }
+            MouseButtonState::Up => !after_double.swap(false, Relaxed),
+        },
+        _ => false,
+    }
 }
 
 /// 显示/隐藏宠物(托盘左键与菜单首项共用)
@@ -2373,30 +2438,27 @@ fn toggle_pet(a: &Rc<App>) {
     }
 }
 
-/// 托盘菜单动作:按当前托盘的 ids 现查序号
+/// 托盘菜单动作:按当前托盘的菜单项现认(托盘随图标位置切换重建,id 会变)
 fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
-    let which = a
-        .state
-        .borrow()
-        .tray
-        .as_ref()
-        .and_then(|t| t.ids.iter().position(|x| x == id));
-    match which {
-        Some(0) => toggle_pet(a),
-        Some(1) => open_settings(a),
-        Some(2) => {
-            // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
-            open_settings(a);
-            a.settings_win.set_page(2);
-            if a.state.borrow().update.is_some() {
-                // 已发现新版:菜单项此时文案是「升级到 vX.Y.Z」,点击即下载安装
-                start_update_install(a);
-            } else {
-                start_update_check(a, true);
-            }
+    let is = |item: fn(&Tray) -> &tray_icon::menu::MenuItem| {
+        (a.state.borrow().tray.as_ref()).is_some_and(|t| item(t).id() == id)
+    };
+    if is(|t| &t.toggle) {
+        toggle_pet(a);
+    } else if is(|t| &t.settings) {
+        open_settings(a);
+    } else if is(|t| &t.update) {
+        // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
+        open_settings(a);
+        a.settings_win.set_page(SettingsPage::General);
+        if a.state.borrow().update.is_some() {
+            // 已发现新版:菜单项此时文案是「升级到 vX.Y.Z」,点击即下载安装
+            start_update_install(a);
+        } else {
+            start_update_check(a, true);
         }
-        Some(_) => quit_app(a),
-        None => {}
+    } else if is(|t| &t.quit) {
+        quit_app(a);
     }
 }
 
@@ -2404,7 +2466,7 @@ fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
 fn sync_update_menu(app: &Rc<App>) {
     let st = app.state.borrow();
     if let (Some(t), Some(u)) = (&st.tray, &st.update) {
-        t.update_item.set_text(format!("升级到 v{}", u.version));
+        t.update.set_text(format!("升级到 v{}", u.version));
     }
 }
 
@@ -2423,14 +2485,77 @@ fn apply_icon_place(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 退出唯一入口:托盘「退出」、设置「退出」、任务栏模式下关闭宠物窗口
-fn quit_app(a: &Rc<App>) {
-    // 拖宠位置保存有 500ms 去抖,退出前无条件落一次盘防丢(隐藏窗口的 position() 依然有效;
-    // 最小化时是系统占位坐标 -32000,不能存)
+/// 进程要退出前落盘宠物位置(quit_app 与一键更新共用):拖宠保存有 500ms 去抖,退出前无条件落一次防丢;
+/// 隐藏窗口的 position() 依然有效,最小化时是系统占位坐标 -32000,不能存
+fn save_pet_pos(a: &Rc<App>) {
     if !pet_minimized(a) {
         let pos = a.pet.window().position();
         a.state.borrow_mut().settings.pet_pos = Some((pos.x, pos.y));
     }
     persist_settings(a);
+}
+
+/// 用户退出唯一入口:托盘「退出」、设置「退出」、任务栏模式下关闭宠物窗口
+/// (一键更新另走:save_pet_pos 后起安装器再退,见 start_update_install)
+fn quit_app(a: &Rc<App>) {
+    save_pet_pos(a);
     let _ = slint::quit_event_loop();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// show_panel 在面板显示前读 header-h 定高:布局属性必须不依赖窗口已显示。
+    /// 本进程只有这一个测试碰 Slint 平台(set_platform 全局只能设一次)
+    #[test]
+    fn panel_header_height_is_known_before_show() {
+        use slint::platform::{software_renderer::MinimalSoftwareWindow, Platform, WindowAdapter};
+        struct Headless;
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(Default::default()))
+            }
+        }
+        slint::platform::set_platform(Box::new(Headless)).unwrap();
+        let panel = PanelWindow::new().unwrap();
+        let h = panel.get_header_h();
+        assert!(h > 0.0 && h < logic::PANEL_MIN_H, "表头高 {h}");
+    }
+
+    #[test]
+    fn tray_double_click_toggles_once() {
+        use tray_icon::{MouseButton, MouseButtonState::*, TrayIconEvent};
+        let click = |button, button_state| TrayIconEvent::Click {
+            id: Default::default(),
+            position: Default::default(),
+            rect: Default::default(),
+            button,
+            button_state,
+        };
+        let double = TrayIconEvent::DoubleClick {
+            id: Default::default(),
+            position: Default::default(),
+            rect: Default::default(),
+            button: MouseButton::Left,
+        };
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let toggles =
+            |evs: &[&TrayIconEvent]| evs.iter().filter(|e| tray_toggle_wanted(e, &flag)).count();
+        let (down, up) = (click(MouseButton::Left, Down), click(MouseButton::Left, Up));
+        assert_eq!(toggles(&[&down, &up]), 1, "单击切一次");
+        assert_eq!(toggles(&[&down, &up, &double, &up]), 1, "双击也只切一次");
+        // 双击后第二个 Up 丢了:下一次单击照常生效
+        assert_eq!(toggles(&[&down, &up, &double]), 1);
+        assert_eq!(toggles(&[&down, &up]), 1);
+        assert_eq!(toggles(&[&click(MouseButton::Right, Up)]), 0, "右键归菜单");
+    }
+
+    #[test]
+    fn plain_name_rejects_anything_that_escapes_the_pet_root() {
+        assert!(is_plain_name("kun-like"));
+        for bad in ["", ".", "..", "a/b", r"a\b", "C:", r"C:\x", "/x", "../x"] {
+            assert!(!is_plain_name(bad), "{bad:?}");
+        }
+    }
 }

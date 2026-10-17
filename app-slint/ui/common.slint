@@ -55,11 +55,14 @@ export struct PhraseRowUi {
     display: string,
 }
 
-/// 宠物库卡片;status 0 可安装 / 1 安装中 / 2 已安装 / 3 使用中
+/// 宠物库卡片状态:可安装 / 安装中 / 已安装(点了即使用)/ 使用中
+export enum GalleryStatus { installable, installing, installed, active }
+
+/// 宠物库卡片
 export struct GalleryCardUi {
     name: string,
     thumb: image,
-    status: int,
+    status: GalleryStatus,
 }
 
 export struct PetCardUi {

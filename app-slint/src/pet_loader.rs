@@ -71,6 +71,11 @@ fn load_pet(dir: &Path) -> Option<PetInfo> {
     })
 }
 
+/// 按 id 找可用(无错误)的宠物
+pub fn find_usable<'a>(pets: &'a [PetInfo], id: &str) -> Option<&'a PetInfo> {
+    pets.iter().find(|p| p.id == id && p.error.is_none())
+}
+
 /// 解码雪碧图并裁出 idle 首帧作缩略图;解码失败返回 None。
 /// 整张 RGBA 约 11.5MB/宠,只在此函数栈上短暂存在;返回的单帧 ~160KB,可安全常驻缓存。
 /// 返回像素缓冲(Send)而非 slint::Image:在后台线程调用,回 UI 线程再包成 Image
@@ -84,8 +89,12 @@ fn thumb_from_sheet(img: &image::DynamicImage) -> slint::SharedPixelBuffer<slint
     let atlas = crate::anim::Atlas::from_size(img.width(), img.height());
     let w = atlas.cell_w.min(img.width());
     let h = atlas.cell_h.min(img.height());
-    let frame = img.crop_imm(0, 0, w, h).into_rgba8();
-    slint::SharedPixelBuffer::clone_from_slice(frame.as_raw(), frame.width(), frame.height())
+    rgba_buffer(&img.crop_imm(0, 0, w, h).into_rgba8())
+}
+
+/// image 的 RGBA 图 → Slint 像素缓冲(宠物卡与宠物库缩略图共用)
+pub fn rgba_buffer(img: &image::RgbaImage) -> slint::SharedPixelBuffer<slint::Rgba8Pixel> {
+    slint::SharedPixelBuffer::clone_from_slice(img.as_raw(), img.width(), img.height())
 }
 
 /// 依序扫描多个根目录,每个根目录下的一级子目录 = 一个宠物包。
@@ -97,7 +106,12 @@ pub fn scan_pets(roots: &[&Path]) -> Vec<PetInfo> {
         let Ok(entries) = fs::read_dir(root) else {
             continue;
         };
-        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        // 点开头的是安装暂存/挪开的旧包(.<slug>.part / .old),不是宠物;petdex slug 不会以点开头
+        let mut dirs: Vec<_> = entries
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| e.path())
+            .collect();
         dirs.sort();
         for dir in dirs {
             if let Some(pet) = load_pet(&dir) {
@@ -178,6 +192,18 @@ mod tests {
         assert_eq!(pets[0].id, "kun-like");
         assert!(pets[0].error.is_none());
         assert!(pets[0].spritesheet.ends_with("spritesheet.webp"));
+    }
+
+    #[test]
+    fn skips_install_staging_dirs() {
+        let root = tempdir().unwrap();
+        for id in ["kun-like", ".kun-like.part"] {
+            make_pet(root.path(), id, Some("{}"), Some("spritesheet.webp"));
+        }
+        make_pet(root.path(), ".kun-like.old", Some("{}"), None);
+        let pets = scan_pets(&[root.path()]);
+        assert_eq!(pets.len(), 1);
+        assert_eq!(pets[0].id, "kun-like");
     }
 
     #[test]

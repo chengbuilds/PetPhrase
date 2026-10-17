@@ -1,8 +1,14 @@
 import { ListView, ScrollView } from "std-widgets.slint";
 import {
     Theme, GroupRowUi, PhraseRowUi, PetCardUi, GroupIcon, IconButton,
-    PrimaryButton, GhostButton, InputArea, SegmentedPair, SegmentedRow, ToggleSwitch, GalleryCardUi
+    PrimaryButton, GhostButton, InputArea, SegmentedPair, SegmentedRow, ToggleSwitch, GalleryCardUi, GalleryStatus
 } from "common.slint";
+
+export enum SettingsPage { phrases, pets, general }
+/// 桌宠页的两个选宠来源:已安装 / 发现更多(在线宠物库)
+export enum PetView { installed, gallery }
+/// 确认框样式:危险删除 / 导入替换
+export enum ConfirmKind { danger, replace }
 
 /// 宠物库卡片:缩略图 + 名称 + 状态按钮;已安装的点击即切换
 component GalleryCard inherits Rectangle {
@@ -11,9 +17,9 @@ component GalleryCard inherits Rectangle {
     width: 130px;
     height: 124px;
     border-radius: 12px;
-    border-width: card.status == 3 ? 2px : 1px;
-    border-color: card.status == 3 ? Theme.accent : (gc-ta.has-hover ? #cbd5e1 : #e2e8f0);
-    background: card.status == 3 ? #fff7ed : #ffffff;
+    border-width: card.status == GalleryStatus.active ? 2px : 1px;
+    border-color: card.status == GalleryStatus.active ? Theme.accent : (gc-ta.has-hover ? #cbd5e1 : #e2e8f0);
+    background: card.status == GalleryStatus.active ? #fff7ed : #ffffff;
     VerticalLayout {
         padding: 8px;
         spacing: 4px;
@@ -42,20 +48,20 @@ component GalleryCard inherits Rectangle {
                 width: st.preferred-width + 20px;
                 height: 22px;
                 border-radius: 11px;
-                background: card.status == 0 ? (gc-ta.has-hover ? #ea580c : Theme.accent)
-                    : card.status == 2 ? (gc-ta.has-hover ? #e2e8f0 : #f1f5f9)
+                background: card.status == GalleryStatus.installable ? (gc-ta.has-hover ? #ea580c : Theme.accent)
+                    : card.status == GalleryStatus.installed ? (gc-ta.has-hover ? #e2e8f0 : #f1f5f9)
                     : transparent;
                 st := Text {
-                    text: card.status == 0 ? "安装" : card.status == 1 ? "安装中…" : card.status == 2 ? "使用" : "使用中";
+                    text: card.status == GalleryStatus.installable ? "安装" : card.status == GalleryStatus.installing ? "安装中…" : card.status == GalleryStatus.installed ? "使用" : "使用中";
                     font-size: 11.5px;
                     font-weight: 600;
-                    color: card.status == 0 ? #ffffff : card.status == 3 ? Theme.accent : Theme.text-secondary;
+                    color: card.status == GalleryStatus.installable ? #ffffff : card.status == GalleryStatus.active ? Theme.accent : Theme.text-secondary;
                 }
             }
         }
     }
     gc-ta := TouchArea {
-        enabled: card.status == 0 || card.status == 2;
+        enabled: card.status == GalleryStatus.installable || card.status == GalleryStatus.installed;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
@@ -204,7 +210,7 @@ export component SettingsWindow inherits Window {
     // 面板按使用频率排序
     in-out property <bool> sort-by-use;
     callback sort-toggled(bool);
-    // 单槽删除撤销(短语),8s 内有效
+    // 单槽删除撤销(短语/分组),main.rs UNDO_SECS 内有效
     in property <bool> can-undo;
     callback undo-delete;
 
@@ -215,6 +221,7 @@ export component SettingsWindow inherits Window {
     in property <bool> update-available;
     in property <bool> update-busy;
     in-out property <bool> auto-check-on;
+    in property <string> auto-check-desc;
     callback check-update;
     callback do-update;
     callback auto-check-toggled(bool);
@@ -223,11 +230,11 @@ export component SettingsWindow inherits Window {
     callback taskbar-toggled(bool);
     callback quit-app;
 
-    // 确认框(泛化:kind 0=危险删除 1=导入替换,动作文案随场景)
+    // 确认框(泛化:样式与动作文案随场景)
     in-out property <bool> confirm-visible: false;
     in property <string> confirm-title;
     in property <string> confirm-msg;
-    in property <int> confirm-kind: 0;
+    in property <ConfirmKind> confirm-kind;
     in property <string> confirm-action-label: "删除";
     callback confirm-ok;
 
@@ -253,12 +260,10 @@ export component SettingsWindow inherits Window {
     callback dismiss-msg;
 
     in-out property <int> editing-idx: -1;
-    // 0 常用语 / 1 桌宠 / 2 通用
-    in-out property <int> page: 0;
+    in-out property <SettingsPage> page;
     // 分组图标选择浮层
     in-out property <bool> icon-picker-open: false;
-    // 桌宠页:0 已安装 / 1 发现更多(在线宠物库)
-    in-out property <int> pet-view: 0;
+    in-out property <PetView> pet-view;
     in property <[GalleryCardUi]> gallery-cards;
     in property <string> gallery-status;
     in property <string> gallery-page-label;
@@ -301,24 +306,28 @@ export component SettingsWindow inherits Window {
                 padding-top: 6px;
                 spacing: 4px;
                 alignment: start;
-                for label[i] in ["常用语", "桌宠", "通用"]: Rectangle {
+                for tab in [
+                    { label: "常用语", page: SettingsPage.phrases },
+                    { label: "桌宠", page: SettingsPage.pets },
+                    { label: "通用", page: SettingsPage.general },
+                ]: Rectangle {
                     width: pt.preferred-width + 32px;
                     pt := Text {
-                        text: label;
+                        text: tab.label;
                         font-size: 13px;
-                        font-weight: root.page == i ? 600 : 400;
-                        color: root.page == i ? Theme.accent : Theme.text-muted;
+                        font-weight: root.page == tab.page ? 600 : 400;
+                        color: root.page == tab.page ? Theme.accent : Theme.text-muted;
                     }
                     Rectangle {
                         y: parent.height - 2px;
                         height: 2px;
                         width: parent.width - 16px;
                         x: 8px;
-                        background: root.page == i ? Theme.accent : transparent;
+                        background: root.page == tab.page ? Theme.accent : transparent;
                     }
                     TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { root.page = i; }
+                        clicked => { root.page = tab.page; }
                     }
                 }
             }
@@ -326,7 +335,7 @@ export component SettingsWindow inherits Window {
         }
 
         // ================= 常用语页 =================
-        if root.page == 0: HorizontalLayout {
+        if root.page == SettingsPage.phrases: HorizontalLayout {
             padding: 0;
             spacing: 0;
 
@@ -754,7 +763,7 @@ export component SettingsWindow inherits Window {
 
         // ================= 桌宠页 =================
         // 已安装 / 发现更多 是「选宠」的两个来源,同页切换
-        if root.page == 1: VerticalLayout {
+        if root.page == SettingsPage.pets: VerticalLayout {
             vertical-stretch: 1;
             padding: 24px;
             padding-bottom: 0;
@@ -766,9 +775,9 @@ export component SettingsWindow inherits Window {
                     width: 240px;
                     left-label: "已安装 (" + root.pets.length + ")";
                     right-label: "发现更多";
-                    right-selected: root.pet-view == 1;
+                    right-selected: root.pet-view == PetView.gallery;
                     changed(r) => {
-                        root.pet-view = r ? 1 : 0;
+                        root.pet-view = r ? PetView.gallery : PetView.installed;
                         if (r) { root.gallery-open(); }
                     }
                 }
@@ -783,7 +792,7 @@ export component SettingsWindow inherits Window {
             }
 
             // ---- 已安装 ----
-            if root.pet-view == 0: ScrollView {
+            if root.pet-view == PetView.installed: ScrollView {
                 vertical-stretch: 1;
                 VerticalLayout {
                     spacing: 10px;
@@ -830,7 +839,7 @@ export component SettingsWindow inherits Window {
             }
 
             // ---- 发现更多(petdex 在线宠物库) ----
-            if root.pet-view == 1: VerticalLayout {
+            if root.pet-view == PetView.gallery: VerticalLayout {
                 vertical-stretch: 1;
                 spacing: 10px;
                 HorizontalLayout {
@@ -908,7 +917,7 @@ export component SettingsWindow inherits Window {
         }
 
         // ================= 通用页(默认窗口尺寸下一屏放下,ScrollView 只兜底缩小窗口) =================
-        if root.page == 2: ScrollView {
+        if root.page == SettingsPage.general: ScrollView {
             vertical-stretch: 1;
             VerticalLayout {
                 padding-left: 24px;
@@ -1030,7 +1039,7 @@ export component SettingsWindow inherits Window {
                     SettingRow {
                         icon: @image-url("icons/clock.svg");
                         title: "自动检查更新";
-                        desc: "启动 10 秒后检查一次,之后每天一次";
+                        desc: root.auto-check-desc;
                         ToggleSwitch {
                             on: root.auto-check-on;
                             toggled(v) => {
@@ -1141,12 +1150,12 @@ export component SettingsWindow inherits Window {
                         width: 44px;
                         height: 44px;
                         border-radius: 22px;
-                        background: root.confirm-kind == 1 ? #fff7ed : #fef2f2;
+                        background: root.confirm-kind == ConfirmKind.replace ? #fff7ed : #fef2f2;
                         Image {
-                            source: root.confirm-kind == 1
+                            source: root.confirm-kind == ConfirmKind.replace
                                 ? @image-url("icons/upload.svg")
                                 : @image-url("icons/trash-2.svg");
-                            colorize: root.confirm-kind == 1 ? Theme.accent : Theme.danger;
+                            colorize: root.confirm-kind == ConfirmKind.replace ? Theme.accent : Theme.danger;
                             width: 20px;
                             height: 20px;
                         }
@@ -1178,8 +1187,8 @@ export component SettingsWindow inherits Window {
                         height: 34px;
                         border-radius: 8px;
                         background: del-ta.has-hover
-                            ? (root.confirm-kind == 1 ? #ea580c : #b91c1c)
-                            : (root.confirm-kind == 1 ? Theme.accent : Theme.danger);
+                            ? (root.confirm-kind == ConfirmKind.replace ? #ea580c : #b91c1c)
+                            : (root.confirm-kind == ConfirmKind.replace ? Theme.accent : Theme.danger);
                         animate background { duration: 150ms; }
                         Text { text: root.confirm-action-label; color: #ffffff; font-weight: 600; }
                         del-ta := TouchArea {

@@ -100,10 +100,19 @@ pub fn search(pets: &[RemotePet], query: &str) -> Vec<usize> {
         .collect()
 }
 
+/// 缩略图磁盘缓存 `%LOCALAPPDATA%\PetPhrase\thumbs`(缓存不进漫游的 APPDATA;卸载时整个删掉)。
+/// 参数传 `env::var_os("LOCALAPPDATA")`;缺这个变量就没有缓存位置,报错而不是随便找个地方放
+pub fn thumb_cache_dir(local_appdata: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    local_appdata
+        .map(|base| PathBuf::from(base).join("PetPhrase").join("thumbs"))
+        .ok_or_else(|| "找不到缩略图缓存位置(LOCALAPPDATA 环境变量缺失)".into())
+}
+
 /// 一页缩略图,一个 curl 进程 --parallel 拉完,落到磁盘缓存(已缓存的跳过)。
-/// 单张失败不影响其它;返回 (slug, 本地路径) 仅含存在的文件
-pub fn fetch_thumbs(pets: &[RemotePet], cache: &Path) -> Vec<(String, PathBuf)> {
-    let _ = std::fs::create_dir_all(cache);
+/// 个别失败(如上游缺这张图)不影响其它,返回 (slug, 本地路径) 仅含存在的文件;
+/// 要拉的一张都没拉到且 curl 报错 = 网络不通,返回 Err
+pub fn fetch_thumbs(pets: &[RemotePet], cache: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    std::fs::create_dir_all(cache).map_err(|e| format!("缩略图缓存目录无法创建:{e}"))?;
     let path_of = |p: &RemotePet| cache.join(format!("{}.webp", p.slug));
     let missing: Vec<(PathBuf, String)> = pets
         .iter()
@@ -123,12 +132,18 @@ pub fn fetch_thumbs(pets: &[RemotePet], cache: &Path) -> Vec<(String, PathBuf)> 
             .collect();
         let mut args: Vec<&str> = vec!["--parallel", "--max-time", "20"];
         args.extend(owned.iter().map(String::as_str));
-        let _ = run_curl(&args); // 部分失败时退出码非零,已下载的照用
+        // 部分失败时退出码也非零,已下载的照用
+        if let Err(e) = run_curl(&args) {
+            if missing.iter().all(|(path, _)| !path.is_file()) {
+                return Err(format!("缩略图加载失败({e})"));
+            }
+        }
     }
-    pets.iter()
+    Ok(pets
+        .iter()
         .map(|p| (p.slug.clone(), path_of(p)))
         .filter(|(_, path)| path.is_file())
-        .collect()
+        .collect())
 }
 
 /// 载入缩略图并裁掉左右整列不透明纯黑的补边:上游把 192:208 的格子塞进 80×80 方图时
@@ -154,49 +169,107 @@ pub fn load_thumb(path: &Path) -> Option<slint::Image> {
     if frame.width() == 0 {
         return None;
     }
-    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-        frame.as_raw(),
-        frame.width(),
-        frame.height(),
-    );
-    Some(slint::Image::from_rgba8(buf))
+    Some(slint::Image::from_rgba8(crate::pet_loader::rgba_buffer(
+        &frame,
+    )))
 }
 
-/// 下载并校验后装进各目标目录。先落临时目录验完再搬,半截下载不会变成「损坏的宠」
+/// 下载校验后装进各目标目录:要么每个目录都装好,要么全部保持原样。
+/// 调用方保证同一 slug 不并发安装(临时目录与暂存目录按 slug 命名)
 pub fn install(pet: &RemotePet, targets: &[PathBuf]) -> Result<(), String> {
     let tmp = std::env::temp_dir().join(format!("petphrase-install-{}", pet.slug));
-    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(&tmp); // 上次进程中途退出的残留,不存在即无事
     std::fs::create_dir_all(&tmp).map_err(|e| format!("创建临时目录失败:{e}"))?;
-    let result = install_via(pet, targets, &tmp);
+    let result = download_verified(pet, &tmp)
+        .and_then(|sheet| place(&tmp, &["pet.json", sheet], &pet.slug, targets));
     let _ = std::fs::remove_dir_all(&tmp);
     result
 }
 
-fn install_via(pet: &RemotePet, targets: &[PathBuf], tmp: &Path) -> Result<(), String> {
-    let ext = if pet.sprite_url.ends_with(".png") {
-        "png"
+/// 下到 tmp 并校验:pet.json 是 JSON、雪碧图是可识别的 petdex 图集。返回雪碧图文件名
+fn download_verified(pet: &RemotePet, tmp: &Path) -> Result<&'static str, String> {
+    let sheet = if pet.sprite_url.ends_with(".png") {
+        "spritesheet.png"
     } else {
-        "webp"
+        "spritesheet.webp"
     };
-    let sheet_name = format!("spritesheet.{ext}");
-    let json_tmp = tmp.join("pet.json");
-    let sheet_tmp = tmp.join(&sheet_name);
-    download(&pet.petjson_url, &json_tmp)?;
-    download(&pet.sprite_url, &sheet_tmp)?;
+    download(&pet.petjson_url, &tmp.join("pet.json"))?;
+    download(&pet.sprite_url, &tmp.join(sheet))?;
     serde_json::from_slice::<serde_json::Value>(
-        &std::fs::read(&json_tmp).map_err(|e| e.to_string())?,
+        &std::fs::read(tmp.join("pet.json")).map_err(|e| e.to_string())?,
     )
     .map_err(|_| "pet.json 格式不正确")?;
-    // 只读文件头取尺寸,确认是图片且网格可识别
-    let (w, h) = image::image_dimensions(&sheet_tmp).map_err(|_| "雪碧图无法识别")?;
-    if w < crate::anim::FRAME_W / 4 || h < crate::anim::FRAME_H / 4 {
-        return Err("雪碧图尺寸异常".into());
+    // 只读文件头取尺寸;非标尺寸装上也只会播错格,直接拒
+    let (w, h) = image::image_dimensions(tmp.join(sheet)).map_err(|_| "雪碧图无法识别")?;
+    crate::anim::Atlas::detect(w, h).ok_or("雪碧图不是 petdex 标准图集(8 列 × 9 或 11 行)")?;
+    Ok(sheet)
+}
+
+/// 把 src 里的 files 整包放进每个 `<root>/<slug>`,全成或全不动:
+/// 先在每个根下暂存 `.<slug>.part`(同盘,换入是 rename),全部暂存好再逐个换入;
+/// 同名旧目录(如损坏的旧包)先挪成 `.<slug>.old`,成功才删。任一步失败就撤掉本次所有改动
+fn place(src: &Path, files: &[&str], slug: &str, targets: &[PathBuf]) -> Result<(), String> {
+    let mut log = PlaceLog::default();
+    let result = place_steps(src, files, slug, targets, &mut log);
+    match &result {
+        Ok(()) => log.olds.iter().for_each(|(old, _)| {
+            let _ = std::fs::remove_dir_all(old); // 已换入成功,旧包删不掉只是多占点盘
+        }),
+        Err(_) => log.undo(),
     }
+    result.map_err(|e| format!("写入失败:{e}"))
+}
+
+/// place 已做的改动,失败时按此撤回
+#[derive(Default)]
+struct PlaceLog {
+    parts: Vec<PathBuf>,
+    /// (挪开的旧目录, 原位置)
+    olds: Vec<(PathBuf, PathBuf)>,
+    placed: Vec<PathBuf>,
+}
+
+impl PlaceLog {
+    fn undo(&self) {
+        // 回滚尽力而为:每步各自独立,一步失败不影响其余步骤
+        for dir in self.parts.iter().chain(&self.placed) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        for (old, dest) in &self.olds {
+            let _ = std::fs::rename(old, dest);
+        }
+    }
+}
+
+fn place_steps(
+    src: &Path,
+    files: &[&str],
+    slug: &str,
+    targets: &[PathBuf],
+    log: &mut PlaceLog,
+) -> std::io::Result<()> {
+    let mut staged = Vec::new();
     for root in targets {
-        let dir = root.join(&pet.slug);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("写入失败:{e}"))?;
-        std::fs::copy(&json_tmp, dir.join("pet.json")).map_err(|e| format!("写入失败:{e}"))?;
-        std::fs::copy(&sheet_tmp, dir.join(&sheet_name)).map_err(|e| format!("写入失败:{e}"))?;
+        let part = root.join(format!(".{slug}.part"));
+        let _ = std::fs::remove_dir_all(&part); // 上次中断的残留,不存在即无事
+        log.parts.push(part.clone());
+        std::fs::create_dir_all(&part)?;
+        for f in files {
+            std::fs::copy(src.join(f), part.join(f))?;
+        }
+        staged.push((root, part));
+    }
+    for (root, part) in staged {
+        let dest = root.join(slug);
+        if dest.exists() {
+            let old = root.join(format!(".{slug}.old"));
+            let _ = std::fs::remove_dir_all(&old);
+            std::fs::rename(&dest, &old)?;
+            log.olds.push((old, dest.clone()));
+        }
+        std::fs::rename(&part, &dest)?;
+        log.parts.retain(|p| p != &part);
+        log.placed.push(dest);
     }
     Ok(())
 }
@@ -258,6 +331,78 @@ mod tests {
         img.save(&path).unwrap();
         let t = load_thumb(&path).unwrap();
         assert_eq!((t.size().width, t.size().height), (74, 80));
+    }
+
+    /// 装好的包:两个文件齐全;根下不留暂存/旧包目录
+    fn assert_placed(root: &Path) {
+        assert!(root.join("p/pet.json").is_file() && root.join("p/s.webp").is_file());
+        let names: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["p"], "不留 .part/.old");
+    }
+
+    fn src_files() -> tempfile::TempDir {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("pet.json"), "{}").unwrap();
+        std::fs::write(src.path().join("s.webp"), "img").unwrap();
+        src
+    }
+
+    #[test]
+    fn place_installs_into_every_root_and_replaces_broken_old_dir() {
+        let src = src_files();
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir_all(b.path().join("p")).unwrap(); // 损坏的旧包:只有个空目录
+        let roots = [a.path().to_path_buf(), b.path().to_path_buf()];
+        place(src.path(), &["pet.json", "s.webp"], "p", &roots).unwrap();
+        assert_placed(a.path());
+        assert_placed(b.path());
+    }
+
+    #[test]
+    fn place_failing_while_staging_leaves_every_root_untouched() {
+        let src = src_files();
+        let a = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(a.path().join("p")).unwrap();
+        std::fs::write(a.path().join("p/keep"), "旧").unwrap();
+        let not_dir = a.path().join("plain-file");
+        std::fs::write(&not_dir, "").unwrap(); // 第二个根是文件:暂存必然失败
+        let roots = [a.path().to_path_buf(), not_dir];
+        assert!(place(src.path(), &["pet.json", "s.webp"], "p", &roots).is_err());
+        assert!(a.path().join("p/keep").is_file(), "旧包原样保留");
+        assert!(!a.path().join(".p.part").exists());
+    }
+
+    #[test]
+    fn place_failing_while_swapping_rolls_back_roots_already_swapped() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let src = src_files();
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir_all(b.path().join("p")).unwrap();
+        // 不共享地占住 b 的旧包里的文件:旧包挪不走,换入在第二个根失败
+        let _lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(b.path().join("p/busy"))
+            .unwrap();
+        let roots = [a.path().to_path_buf(), b.path().to_path_buf()];
+        assert!(place(src.path(), &["pet.json", "s.webp"], "p", &roots).is_err());
+        assert!(!a.path().join("p").exists(), "已换入的根被撤回");
+        assert!(!a.path().join(".p.part").exists() && !b.path().join(".p.part").exists());
+        assert!(b.path().join("p/busy").is_file(), "旧包原样保留");
+    }
+
+    #[test]
+    fn thumb_cache_dir_needs_localappdata() {
+        assert_eq!(
+            thumb_cache_dir(Some(r"C:\Users\u\AppData\Local".into())).unwrap(),
+            Path::new(r"C:\Users\u\AppData\Local\PetPhrase\thumbs")
+        );
+        assert!(thumb_cache_dir(None).is_err(), "缺变量报错,不回落到别处");
     }
 
     #[test]

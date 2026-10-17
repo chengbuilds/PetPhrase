@@ -10,11 +10,12 @@ const COLUMNS: u32 = 8;
 const ANIM_ROWS: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// 左/右跑保留以与上游状态表一一对应;拖动时系统拖窗模态循环会冻结 Slint 定时器,播不了
-#[allow(dead_code)]
 pub enum PetState {
     Idle,
+    // 左/右跑保留以与上游状态表一一对应;拖动时系统拖窗模态循环会冻结 Slint 定时器,播不了
+    #[allow(dead_code)]
     RunRight,
+    #[allow(dead_code)]
     RunLeft,
     Wave,
     Jump,
@@ -87,28 +88,29 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    /// 按上游 detectSpriteAtlas 识别 v1(8×9)/v2(8×11),允许整数格等比缩放;
-    /// 非标尺寸宽松兜底:按 192×208 切,行数按图高推算,至少 1 行
-    pub fn from_size(w: u32, h: u32) -> Atlas {
-        for rows in [9u32, 11] {
+    /// 按上游 detectSpriteAtlas 识别 v1(8×9)/v2(8×11),允许整数格等比缩放;非标尺寸返回 None
+    pub fn detect(w: u32, h: u32) -> Option<Atlas> {
+        [9u32, 11].into_iter().find_map(|rows| {
             let canon_w = (COLUMNS * FRAME_W) as u64;
             let canon_h = (rows * FRAME_H) as u64;
-            if w.is_multiple_of(COLUMNS)
+            (w.is_multiple_of(COLUMNS)
                 && h.is_multiple_of(rows)
-                && w as u64 * canon_h == h as u64 * canon_w
-            {
-                return Atlas {
+                && w as u64 * canon_h == h as u64 * canon_w)
+                .then(|| Atlas {
                     cell_w: w / COLUMNS,
                     cell_h: h / rows,
                     rows,
-                };
-            }
-        }
-        Atlas {
+                })
+        })
+    }
+
+    /// 本地已装的包宽松加载:非标尺寸按 192×208 切,行数按图高推算,至少 1 行
+    pub fn from_size(w: u32, h: u32) -> Atlas {
+        Atlas::detect(w, h).unwrap_or(Atlas {
             cell_w: FRAME_W,
             cell_h: FRAME_H,
             rows: (h / FRAME_H).max(1),
-        }
+        })
     }
 
     /// 可用于动画的行数(v2 的朝向行不算)
@@ -117,7 +119,7 @@ impl Atlas {
     }
 }
 
-/// 两层状态:base 是持续情境(闲置/等待/审阅/拖动跑步)的循环动画,
+/// 两层状态:base 是持续情境(闲置/等待/审阅)的循环动画,
 /// play_once 的一次性动作(挥手/失败/彩蛋)播完回到 base
 pub struct Animator {
     rows: u32,
@@ -226,9 +228,14 @@ mod tests {
         assert_eq!(pet.error, None);
         let img = image::open(&pet.spritesheet).unwrap().into_rgba8();
         let atlas = Atlas::from_size(img.width(), img.height());
-        assert_eq!((atlas.cell_w, atlas.cell_h, atlas.rows), (FRAME_W, FRAME_H, ANIM_ROWS));
+        assert_eq!(
+            (atlas.cell_w, atlas.cell_h, atlas.rows),
+            (FRAME_W, FRAME_H, ANIM_ROWS)
+        );
         use PetState::*;
-        for s in [Idle, RunRight, RunLeft, Wave, Jump, Failed, Waiting, Run, Review] {
+        for s in [
+            Idle, RunRight, RunLeft, Wave, Jump, Failed, Waiting, Run, Review,
+        ] {
             let (row, durs) = s.def();
             for col in 0..COLUMNS {
                 let drawn = (0..FRAME_H).any(|y| {
@@ -270,7 +277,13 @@ mod tests {
             9,
             "v2 朝向行不参与动画"
         );
-        // 非标尺寸宽松兜底
+        // 非标尺寸:严格识别拒绝(宠物库安装用),宽松加载兜底(本地包用)
+        assert_eq!(Atlas::detect(1536, 416), None);
+        assert_eq!(
+            Atlas::detect(768, 936).map(|a| a.rows),
+            Some(9),
+            "等比缩放可识别"
+        );
         assert_eq!(
             Atlas::from_size(1536, 416),
             Atlas {

@@ -39,7 +39,12 @@ component CtxMenuRow inherits Rectangle {
 export component PanelWindow inherits Window {
     in property <[TabUi]> tabs;
     in property <[PanelItemUi]> items;
-    in property <float> content-h;
+    // 列表排版全由 Rust(logic::layout_panel)算:是否搜索态、末尾「+ 添加」行(h = 0 不显示)、列表总高
+    in property <bool> searching;
+    in property <PanelItemUi> add-row;
+    in property <float> list-h;
+    // 搜索栏 + 分组 Tab 条总高,Rust 读来给面板定高
+    out property <length> header-h: list-flick.y;
     in property <bool> show-grid-btn;
     in-out property <string> search-text;
     // 复制反馈:命中条目下标,-1 无
@@ -249,8 +254,7 @@ export component PanelWindow inherits Window {
                 // ---- 混排列表 ----
                 list-flick := Flickable {
                     vertical-stretch: 1;
-                    // 末尾「+ 添加」占一行(搜索态不显示)
-                    viewport-height: Math.max(root.content-h * 1px + (root.search-text == "" && root.items.length > 0 ? 40px : 0px) + 20px, self.height);
+                    viewport-height: Math.max(root.list-h * 1px, self.height);
 
                     Rectangle {
                         x: 10px;
@@ -338,17 +342,17 @@ export component PanelWindow inherits Window {
                             }
                         }
 
-                        if root.search-text == "" && root.items.length > 0: Rectangle {
-                            x: 0;
-                            y: root.content-h * 1px + 6px;
-                            width: add-lbl.preferred-width + 28px;
-                            height: 28px;
+                        if root.add-row.h > 0: Rectangle {
+                            x: root.add-row.x * 1px;
+                            y: root.add-row.y * 1px;
+                            width: root.add-row.w * 1px;
+                            height: root.add-row.h * 1px;
                             border-radius: 999px;
                             border-width: 1px;
                             border-color: add-ta.has-hover ? Theme.accent : Theme.border-soft;
                             background: add-ta.has-hover ? Theme.surface-item-hover : transparent;
-                            add-lbl := Text {
-                                text: "+ 添加";
+                            Text {
+                                text: root.add-row.text;
                                 color: add-ta.has-hover ? Theme.accent : Theme.text-muted;
                                 font-size: 12.5px;
                             }
@@ -358,7 +362,7 @@ export component PanelWindow inherits Window {
                             }
                         }
 
-                        if root.items.length == 0 && root.search-text != "": Text {
+                        if root.items.length == 0 && root.searching: Text {
                             y: 40px;
                             width: parent.width;
                             horizontal-alignment: center;
@@ -366,7 +370,7 @@ export component PanelWindow inherits Window {
                             color: Theme.text-muted;
                             font-size: 12px;
                         }
-                        if root.items.length == 0 && root.search-text == "": VerticalLayout {
+                        if root.items.length == 0 && !root.searching: VerticalLayout {
                             y: 32px;
                             width: parent.width;
                             spacing: 12px;

@@ -37,6 +37,13 @@ pub struct PhraseData {
     pub groups: Vec<Group>,
 }
 
+impl PhraseData {
+    /// 按 id 找分组下标。下标随增删/拖拽变动,跨交互保存的目标(上次分组、待确认的删除)要存 id
+    pub fn group_pos(&self, id: &str) -> Option<usize> {
+        self.groups.iter().position(|g| g.id == id)
+    }
+}
+
 impl Default for PhraseData {
     fn default() -> Self {
         PhraseData {
@@ -237,22 +244,29 @@ pub const MAX_GROUPS: usize = 500;
 pub const MAX_PHRASES_PER_GROUP: usize = 5000;
 pub const MAX_TEXT_CHARS: usize = 10_000;
 
-/// 短语文本唯一入口校验(面板编辑器/设置页/导入共用):去首尾空白,拒空与超长
+/// 用户输入的短语文本校验(面板编辑器/设置页共用):去首尾空白,拒空与超长
 pub fn validate_text(text: &str) -> Result<String, String> {
     let t = text.trim();
     if t.is_empty() {
         return Err("内容不能为空".into());
     }
-    let n = t.chars().count();
+    check_len(t)?;
+    Ok(t.to_string())
+}
+
+/// 短语长度上限(输入与导入共用)
+fn check_len(text: &str) -> Result<(), String> {
+    let n = text.chars().count();
     if n > MAX_TEXT_CHARS {
         return Err(format!("内容过长({n} 字,上限 {MAX_TEXT_CHARS})"));
     }
-    Ok(t.to_string())
+    Ok(())
 }
 /// 导入文件大小上限:读入内存前先查 metadata,防异常大文件撑爆内存
 pub const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 导入数据的语义校验+修补:规模/超长文本报错;空名、空短语、缺失/重复 id 就地修补。
+/// 导入是恢复备份:短语原文一字不动(不去首尾空白),只丢纯空白条目
 fn sanitize_import(data: &mut PhraseData) -> Result<(), String> {
     if data.groups.len() > MAX_GROUPS {
         return Err(format!("分组过多({},上限 {MAX_GROUPS})", data.groups.len()));
@@ -278,8 +292,8 @@ fn sanitize_import(data: &mut PhraseData) -> Result<(), String> {
             ));
         }
         g.phrases.retain(|p| !p.text.trim().is_empty());
-        for p in &mut g.phrases {
-            p.text = validate_text(&p.text).map_err(|e| format!("存在超长短语:{e}"))?;
+        for p in &g.phrases {
+            check_len(&p.text).map_err(|e| format!("存在超长短语:{e}"))?;
         }
         for p in &mut g.phrases {
             while p.id.trim().is_empty() || !ids.insert(p.id.clone()) {
@@ -333,6 +347,25 @@ mod tests {
             .push(Phrase::new("x".into(), "测试".into()));
         save_phrases(dir.path(), &data).unwrap();
         assert_eq!(load_phrases(dir.path()), data);
+    }
+
+    #[test]
+    fn group_pos_follows_id_across_reorder() {
+        let g = |id: &str| Group {
+            id: id.into(),
+            name: id.into(),
+            icon: None,
+            phrases: Vec::new(),
+        };
+        let mut data = PhraseData {
+            groups: vec![g("a"), g("b"), g("c")],
+        };
+        assert_eq!(data.group_pos("b"), Some(1));
+        // 确认框开着时分组被拖拽/删除:按 id 仍找到原目标,目标没了就找不到
+        data.groups.swap(0, 1);
+        assert_eq!(data.group_pos("b"), Some(0));
+        data.groups.remove(0);
+        assert_eq!(data.group_pos("b"), None);
     }
 
     #[test]
@@ -411,7 +444,7 @@ mod tests {
         fs::write(
             &src,
             r#"{"groups":[
-                {"id":"a","name":"  ","phrases":[{"id":"x","text":"one"},{"id":"x","text":"   "}]},
+                {"id":"a","name":"  ","phrases":[{"id":"x","text":"  one\n"},{"id":"x","text":"   "}]},
                 {"id":"a","name":"B","phrases":[{"id":"","text":"two"}]}
             ]}"#,
         )
@@ -419,6 +452,10 @@ mod tests {
         let data = read_import(&src).unwrap();
         assert_eq!(data.groups[0].name, "未命名");
         assert_eq!(data.groups[0].phrases.len(), 1, "空白短语被丢弃");
+        assert_eq!(
+            data.groups[0].phrases[0].text, "  one\n",
+            "原文首尾空白保留"
+        );
         assert_ne!(data.groups[0].id, data.groups[1].id, "重复分组 id 被重建");
         assert!(!data.groups[1].phrases[0].id.is_empty(), "空短语 id 被补齐");
     }
@@ -487,19 +524,8 @@ mod tests {
 
     #[test]
     fn validate_text_trims_and_rejects() {
-        assert_eq!(
-            validate_text(
-                "  hi 
-"
-            )
-            .unwrap(),
-            "hi"
-        );
-        assert!(validate_text(
-            " 
- "
-        )
-        .is_err());
+        assert_eq!(validate_text("  hi \n").unwrap(), "hi");
+        assert!(validate_text(" \n ").is_err());
         assert!(validate_text(&"x".repeat(MAX_TEXT_CHARS + 1)).is_err());
     }
 
