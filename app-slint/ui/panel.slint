@@ -88,6 +88,8 @@ export component PanelWindow inherits Window {
 
     // 面板高度:每次显示前由 Rust 按内容一次性算好(不跟手 resize,亚克力逐帧改尺寸会闪)
     in property <length> panel-h: 400px;
+    // 系统丢弃窗口画面后由 Rust 翻转,迫使整窗重画(见 main.rs os_invalidated)
+    in property <bool> repaint-flip;
 
     no-frame: true;
     always-on-top: true;
@@ -122,7 +124,7 @@ export component PanelWindow inherits Window {
 
         Rectangle {
             border-radius: 14px;
-            background: Theme.surface-panel;
+            background: root.repaint-flip ? Theme.surface-panel : Theme.surface-panel.darker(0.004);
             border-width: 1px;
             border-color: Theme.border-soft;
             clip: true;
