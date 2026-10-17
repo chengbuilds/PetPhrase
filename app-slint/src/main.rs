@@ -1351,11 +1351,16 @@ fn dbg_log(msg: &str) {
 
 fn hide_panel(app: &Rc<App>) {
     app.panel.set_grid_open(false);
+    app.panel.set_pinned(false); // 收起即解除常驻(点宠/Esc/图钉关,语义一致)
+    stash_panel(app);
+}
+
+/// 隐藏面板窗口的唯一收尾(hide_panel 与设置窗暂隐常驻面板共用):关右键菜单与编辑器、隐藏、刷宠物情境
+fn stash_panel(app: &Rc<App>) {
     app.panel.set_ctx_open(false);
     // 编辑器一并关+清目标:否则重开面板露出陈旧编辑器,期间数据变动过的话 pending_edit 下标错位会改错短语
     app.panel.set_editor_open(false);
     app.state.borrow_mut().pending_edit = None;
-    app.panel.set_pinned(false); // 收起即解除常驻(点宠/Esc/图钉关,语义一致)
     let _ = app.panel.window().hide();
     update_pet_base(app);
 }
@@ -1366,10 +1371,7 @@ fn open_settings(app: &Rc<App>) {
     // 常驻面板遇设置窗:暂隐(保留图钉),设置关闭后恢复
     if app.panel.get_pinned() && app.panel.window().is_visible() {
         app.state.borrow_mut().panel_resume_after_settings = true;
-        app.panel.set_ctx_open(false);
-        app.panel.set_editor_open(false);
-        let _ = app.panel.window().hide();
-        update_pet_base(app);
+        stash_panel(app);
     }
     // 先 show 再刷:refresh_pet_cards 只给可见的设置窗干活;同一轮回调内刷完才渲染,不会闪旧内容
     let _ = app.settings_win.show();
