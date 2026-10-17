@@ -2268,10 +2268,8 @@ fn start_update_install(app: &Rc<App>) {
                         return;
                     }
                 };
-                // 与托盘退出同款:位置保存有 500ms 去抖,退出前无条件落一次盘
-                let pos = a.pet.window().position();
-                a.state.borrow_mut().settings.pet_pos = Some((pos.x, pos.y));
-                persist_settings(a);
+                // 安装器一起来就 taskkill 本进程,位置必须在起安装器之前落盘
+                save_pet_pos(a);
                 match updater::launch_installer(path) {
                     Ok(()) => {
                         let _ = slint::quit_event_loop();
@@ -2423,14 +2421,19 @@ fn apply_icon_place(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 退出唯一入口:托盘「退出」、设置「退出」、任务栏模式下关闭宠物窗口
-fn quit_app(a: &Rc<App>) {
-    // 拖宠位置保存有 500ms 去抖,退出前无条件落一次盘防丢(隐藏窗口的 position() 依然有效;
-    // 最小化时是系统占位坐标 -32000,不能存)
+/// 进程要退出前落盘宠物位置(quit_app 与一键更新共用):拖宠保存有 500ms 去抖,退出前无条件落一次防丢;
+/// 隐藏窗口的 position() 依然有效,最小化时是系统占位坐标 -32000,不能存
+fn save_pet_pos(a: &Rc<App>) {
     if !pet_minimized(a) {
         let pos = a.pet.window().position();
         a.state.borrow_mut().settings.pet_pos = Some((pos.x, pos.y));
     }
     persist_settings(a);
+}
+
+/// 用户退出唯一入口:托盘「退出」、设置「退出」、任务栏模式下关闭宠物窗口
+/// (一键更新另走:save_pet_pos 后起安装器再退,见 start_update_install)
+fn quit_app(a: &Rc<App>) {
+    save_pet_pos(a);
     let _ = slint::quit_event_loop();
 }
