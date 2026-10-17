@@ -58,9 +58,7 @@ PetPhrase 兼容 [petdex](https://petdex.dev/) 桌宠格式——那个在 X 上
 
 打开 PetPhrase 设置 →「桌宠」→「发现更多」,直接浏览、搜索 petdex 上的全部桌宠,点「安装」即下载并切换,**无需 Node.js、无需重启**。同页右上角可调桌宠大小(小/中/大)。
 
-| `kun-like` | `doraemon` |
-|:---:|:---:|
-| ![爱坤](screenshots/kun-like.png) | ![哆啦A梦](screenshots/doraemon.png) |
+<img src="screenshots/settings-gallery.png" width="560" alt="设置「发现更多」:在线浏览、搜索并一键安装 petdex 桌宠">
 
 习惯命令行也可以用官方 CLI(需要 [Node.js](https://nodejs.org/)),装好的桌宠同样会出现在「已安装」里:
 
