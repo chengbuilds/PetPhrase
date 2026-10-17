@@ -255,6 +255,8 @@ struct State {
     animator: Animator,
     clipboard: Option<arboard::Clipboard>,
     thumb_cache: HashMap<String, slint::Image>,
+    /// 后台缩略图线程在跑(同一时刻只跑一个,补完后再看有没有新缺的)
+    thumb_loading: bool,
     panel_native_ready: bool,
     /// show 后是否真正拿到过焦点 —— 防初始 Focused(false) 误隐藏
     panel_got_focus: bool,
@@ -464,6 +466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             animator: Animator::new(1),
             clipboard: arboard::Clipboard::new().ok(),
             thumb_cache: HashMap::new(),
+            thumb_loading: false,
             panel_native_ready: false,
             panel_got_focus: false,
             pending_edit: None,
@@ -545,8 +548,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let a = app.clone();
         app.settings_win.window().on_close_requested(move || {
-            a.state.borrow_mut().thumb_cache.clear();
-            a.state.borrow_mut().gallery = None;
+            {
+                let mut st = a.state.borrow_mut();
+                st.thumb_cache.clear();
+                st.thumb_loading = false;
+                st.gallery = None;
+            }
+            THUMB_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // 在跑的缩略图线程作废
             a.settings_win.set_pet_view(0);
             a.settings_win
                 .set_gallery_cards(ModelRc::new(VecModel::from(Vec::<GalleryCardUi>::new())));
@@ -1316,10 +1324,11 @@ fn open_settings(app: &Rc<App>) {
         let _ = app.panel.window().hide();
         update_pet_base(app);
     }
+    // 先 show 再刷:refresh_pet_cards 只给可见的设置窗干活;同一轮回调内刷完才渲染,不会闪旧内容
+    let _ = app.settings_win.show();
     refresh_pets(app);
     refresh_pet_cards(app);
     refresh_settings(app);
-    let _ = app.settings_win.show();
     app.settings_win
         .window()
         .with_winit_window(|w: &winit::window::Window| {
@@ -1384,21 +1393,28 @@ fn refresh_settings(app: &Rc<App>) {
     app.settings_win.set_has_group(has_group);
 }
 
-/// 宠物卡。缺缓存的宠要解码整张雪碧图(~11.5MB/宠)做缩略图,
-/// 只由打开设置/换宠/换目录调用,和常用语数据刷新彻底分开
+/// 宠物卡。缺缓存的缩略图交后台线程解码整张雪碧图(~11.5MB/宠),卡片先空着、逐张补上:
+/// 以前同步解码,装了十几只宠时点「设置」要卡半秒多才出窗口。
+/// 只由打开设置/换宠/换目录调用,和常用语数据刷新彻底分开。
+/// 设置窗不可见时不干活:关窗已清缓存,后台安装完成等路径别再把缩略图解码回内存
 fn refresh_pet_cards(app: &Rc<App>) {
+    if !app.settings_win.window().is_visible() {
+        return;
+    }
     let mut st = app.state.borrow_mut();
     let pets = st.pets.clone();
     let selected_pet = st.settings.pet_id.clone();
     let mut cards = Vec::new();
+    let mut missing = Vec::new();
     for p in &pets {
-        let thumb = if p.error.is_none() {
-            st.thumb_cache
-                .entry(p.spritesheet.clone())
-                .or_insert_with(|| pet_loader::load_thumb(&p.spritesheet))
-                .clone()
-        } else {
-            slint::Image::default()
+        let thumb = match st.thumb_cache.get(&p.spritesheet) {
+            Some(img) => img.clone(),
+            None => {
+                if p.error.is_none() {
+                    missing.push(p.spritesheet.clone());
+                }
+                slint::Image::default()
+            }
         };
         cards.push(PetCardUi {
             removable: is_removable(p),
@@ -1415,12 +1431,53 @@ fn refresh_pet_cards(app: &Rc<App>) {
         .unwrap_or_default()
         .into();
     let size_idx = pet_scale_idx(st.settings.pet_scale);
+    let spawn = !missing.is_empty() && !st.thumb_loading;
+    st.thumb_loading |= spawn;
     drop(st);
+    if spawn {
+        spawn_thumb_loader(missing);
+    }
 
     app.settings_win.set_pet_size_idx(size_idx);
     app.settings_win
         .set_pets(ModelRc::new(VecModel::from(cards)));
     app.settings_win.set_custom_dir(custom_dir);
+}
+
+/// 设置窗关闭即 +1:关窗后缓存已清,在跑线程的结果不再收
+static THUMB_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 逐张解码(峰值只占一张整图),每张解码完回 UI 线程入缓存并刷新卡片
+fn spawn_thumb_loader(paths: Vec<String>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let gen = THUMB_GEN.load(Relaxed);
+    std::thread::spawn(move || {
+        let n = paths.len();
+        for (i, path) in paths.into_iter().enumerate() {
+            if THUMB_GEN.load(Relaxed) != gen {
+                return; // 设置窗已关,剩下的不必解码
+            }
+            let buf = pet_loader::load_thumb(&path);
+            let last = i + 1 == n;
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|a| {
+                    if THUMB_GEN.load(Relaxed) != gen {
+                        return;
+                    }
+                    {
+                        let mut st = a.state.borrow_mut();
+                        // 解码失败也记一张空图:卡片照常显示名称,不反复重试
+                        st.thumb_cache
+                            .insert(path, buf.map(slint::Image::from_rgba8).unwrap_or_default());
+                        if last {
+                            st.thumb_loading = false; // 下一次刷新可再起线程补期间新出现的宠
+                        }
+                    }
+                    refresh_pet_cards(a);
+                })
+            });
+        }
+    });
 }
 
 fn uid() -> String {

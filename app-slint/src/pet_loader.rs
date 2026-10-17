@@ -71,27 +71,21 @@ fn load_pet(dir: &Path) -> Option<PetInfo> {
     })
 }
 
-/// 解码雪碧图并裁出 idle 首帧作缩略图。
+/// 解码雪碧图并裁出 idle 首帧作缩略图;解码失败返回 None。
 /// 整张 RGBA 约 11.5MB/宠,只在此函数栈上短暂存在;返回的单帧 ~160KB,可安全常驻缓存。
-pub fn load_thumb(path: &str) -> slint::Image {
-    let Ok(img) = image::open(Path::new(path)) else {
-        return slint::Image::default();
-    };
-    thumb_from_sheet(&img)
+/// 返回像素缓冲(Send)而非 slint::Image:在后台线程调用,回 UI 线程再包成 Image
+pub fn load_thumb(path: &str) -> Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>> {
+    let img = image::open(Path::new(path)).ok()?;
+    Some(thumb_from_sheet(&img))
 }
 
 /// 按图集几何裁首格(等比缩放的素材格子不是 192×208)
-pub fn thumb_from_sheet(img: &image::DynamicImage) -> slint::Image {
+fn thumb_from_sheet(img: &image::DynamicImage) -> slint::SharedPixelBuffer<slint::Rgba8Pixel> {
     let atlas = crate::anim::Atlas::from_size(img.width(), img.height());
     let w = atlas.cell_w.min(img.width());
     let h = atlas.cell_h.min(img.height());
     let frame = img.crop_imm(0, 0, w, h).into_rgba8();
-    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-        frame.as_raw(),
-        frame.width(),
-        frame.height(),
-    );
-    slint::Image::from_rgba8(buf)
+    slint::SharedPixelBuffer::clone_from_slice(frame.as_raw(), frame.width(), frame.height())
 }
 
 /// 依序扫描多个根目录,每个根目录下的一级子目录 = 一个宠物包。
@@ -241,19 +235,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sheet.png");
         image::RgbaImage::new(1536, 1872).save(&path).unwrap();
-        let thumb = load_thumb(&path.to_string_lossy());
-        let size = thumb.size();
-        assert_eq!((size.width, size.height), (192, 208));
+        let thumb = load_thumb(&path.to_string_lossy()).unwrap();
+        assert_eq!((thumb.width(), thumb.height()), (192, 208));
 
         // 等比缩半的素材按格子裁,不按 192×208 硬切
         image::RgbaImage::new(768, 936).save(&path).unwrap();
-        let size = load_thumb(&path.to_string_lossy()).size();
-        assert_eq!((size.width, size.height), (96, 104));
+        let thumb = load_thumb(&path.to_string_lossy()).unwrap();
+        assert_eq!((thumb.width(), thumb.height()), (96, 104));
     }
 
     #[test]
-    fn thumb_on_unreadable_file_returns_default() {
-        let thumb = load_thumb("Z:/no/such/sheet.webp");
-        assert_eq!(thumb.size().width, 0);
+    fn thumb_on_unreadable_file_returns_none() {
+        assert!(load_thumb("Z:/no/such/sheet.webp").is_none());
     }
 }

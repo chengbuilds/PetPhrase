@@ -66,7 +66,7 @@ component PetCard inherits Rectangle {
     in property <PetCardUi> pet;
     callback clicked;
     callback delete-clicked;
-    width: 118px;
+    width: 110px;
     height: 132px;
     border-radius: 12px;
     border-width: 2px;
@@ -795,14 +795,15 @@ export component SettingsWindow inherits Window {
                         color: Theme.text-muted;
                         wrap: word-wrap;
                     }
-                    // 宠物多行网格:每行 5 张(780 窗宽 - 48 padding 下第 6 张会截断)
-                    for rowidx in Math.ceil(root.pets.length / 5): HorizontalLayout {
+                    // 宠物多行网格:每行 6 张 × 110 + 间距 = 710,780 窗宽 - 48 padding 后右侧
+                    // 留出 14px 给覆盖在内容上的纵向滚动条(否则挡住末列卡片的删除按钮)
+                    for rowidx in Math.ceil(root.pets.length / 6): HorizontalLayout {
                         spacing: 10px;
                         alignment: start;
-                        for colidx in Math.min(5, root.pets.length - rowidx * 5): PetCard {
-                            pet: root.pets[rowidx * 5 + colidx];
-                            clicked => { root.pet-selected(rowidx * 5 + colidx); }
-                            delete-clicked => { root.pet-delete(rowidx * 5 + colidx); }
+                        for colidx in Math.min(6, root.pets.length - rowidx * 6): PetCard {
+                            pet: root.pets[rowidx * 6 + colidx];
+                            clicked => { root.pet-selected(rowidx * 6 + colidx); }
+                            delete-clicked => { root.pet-delete(rowidx * 6 + colidx); }
                         }
                     }
                     HorizontalLayout {
