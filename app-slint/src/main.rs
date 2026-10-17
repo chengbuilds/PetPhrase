@@ -63,10 +63,20 @@ fn data_dir() -> PathBuf {
     .clone()
 }
 
-/// 设置窗「数据」区消息统一入口:错误红色高亮,普通消息灰色
+/// 设置窗全局消息条统一入口:错误红色常驻(点击关闭),普通消息 3s 自动消失
 fn set_data_msg(app: &Rc<App>, msg: &str, is_err: bool) {
     app.settings_win.set_data_msg(msg.into());
     app.settings_win.set_data_msg_error(is_err);
+    if is_err || msg.is_empty() {
+        app.msg_timer.stop();
+    } else {
+        let a = app.clone();
+        app.msg_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_secs(3),
+            move || set_data_msg(&a, "", false),
+        );
+    }
 }
 
 /// 保存失败双通道提示:设置窗「数据」区 + 面板红色横幅(面板内编辑时设置窗常不可见)。
@@ -265,6 +275,7 @@ struct App {
     undo_timer: slint::Timer,
     /// 帧定时器:每帧时长不同,单发链式续约
     frame_timer: slint::Timer,
+    msg_timer: slint::Timer,
 }
 
 // 后台线程结果经 invoke_from_event_loop 回主线程时取 App:
@@ -410,6 +421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         update_timer: slint::Timer::default(),
         undo_timer: slint::Timer::default(),
         frame_timer: slint::Timer::default(),
+        msg_timer: slint::Timer::default(),
     });
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -1049,6 +1061,7 @@ fn ensure_panel_native(app: &Rc<App>) {
 /// 贴宠定位(物理像素)
 fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
     let scale = app.pet.window().scale_factor();
+    let panel_h = app.panel.get_panel_h();
     app.pet
         .window()
         .with_winit_window(|w: &winit::window::Window| {
@@ -1071,7 +1084,7 @@ fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
                     h: size.height as f32,
                 },
                 logic::PANEL_W * scale,
-                logic::PANEL_H * scale,
+                panel_h * scale,
                 logic::Rect {
                     x: mx,
                     y: my,
@@ -1092,17 +1105,19 @@ fn toggle_panel(app: &Rc<App>) {
 }
 
 fn show_panel(app: &Rc<App>) {
+    app.panel.set_search_text("".into());
+    app.panel.invoke_reset_scroll();
+    refresh_panel(app);
+    // 显示前按内容一次性定高,再按实际高度贴宠定位
+    let h = logic::panel_height(&app.state.borrow().items);
+    app.panel.set_panel_h(h);
     let Some(placement) = compute_panel_placement(app) else {
         dbg_log("show_panel: no placement (pet native window missing?)");
         return;
     };
     app.state.borrow_mut().panel_got_focus = false;
-
-    app.panel.set_search_text("".into());
-    app.panel.invoke_reset_scroll();
-    refresh_panel(app);
     dbg_log(&format!(
-        "show_panel: show at {},{}",
+        "show_panel: show at {},{} h={h}",
         placement.x, placement.y
     ));
     if let Err(e) = app.panel.show() {
@@ -1527,6 +1542,18 @@ fn wire_settings(app: &Rc<App>) {
     });
 
     let a = app.clone();
+    app.settings_win.on_clear_dir(move || {
+        a.state.borrow_mut().settings.custom_pet_dir = None;
+        persist_settings(&a);
+        refresh_pets(&a);
+        refresh_pet_cards(&a);
+    });
+
+    let a = app.clone();
+    app.settings_win
+        .on_dismiss_msg(move || set_data_msg(&a, "", false));
+
+    let a = app.clone();
     app.settings_win.on_do_export(move || {
         if let Some(path) = rfd::FileDialog::new()
             .set_title("导出常用语")
@@ -1800,9 +1827,9 @@ fn on_tray_menu(a: &Rc<App>, which: usize) {
         }
         1 => open_settings(a),
         2 => {
-            // 打开设置「外观与行为」页给进度/结果反馈
+            // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
             open_settings(a);
-            a.settings_win.set_page(1);
+            a.settings_win.set_page(2);
             if a.state.borrow().update.is_some() {
                 // 已发现新版:菜单项此时文案是「升级到 vX.Y.Z」,点击即下载安装
                 start_update_install(a);
