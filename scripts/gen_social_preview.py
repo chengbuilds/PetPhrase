@@ -1,6 +1,5 @@
 # 生成 GitHub Social Preview 卡(1280×640,Settings → Social preview 手动上传)
-# 素材:screenshots/pet-desktop.png(白底精灵,四角泛洪抠背景);短语文案为虚构示例
-from collections import deque
+# 素材:app-slint/pets/default/spritesheet.webp(内置默认宠 idle 首帧);短语文案为虚构示例
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -19,25 +18,12 @@ def font(path, size):
     return ImageFont.truetype(f"C:/Windows/Fonts/{path}", size)
 
 
-def keyed_sprite(path, scale):
-    """白底精灵抠图:仅从四角泛洪连通的背景置透明,保住图案内部白色。"""
-    im = Image.open(path).convert("RGBA")
-    px = im.load()
-    w, h = im.size
-    bg = px[0, 0][:3]
-    seen = set()
-    q = deque([(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)])
-    while q:
-        x, y = q.popleft()
-        if (x, y) in seen or not (0 <= x < w and 0 <= y < h):
-            continue
-        seen.add((x, y))
-        r, g, b, _ = px[x, y]
-        if abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) > 60:
-            continue
-        px[x, y] = (r, g, b, 0)
-        q.extend([(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)])
-    return im.resize((w * scale, h * scale), Image.NEAREST)
+def default_pet(scale):
+    """内置默认宠 idle 首帧,裁到不透明包围盒后放大(玻璃泡泡是平滑图,用 LANCZOS 不用最近邻)。"""
+    sheet = Image.open(ROOT / "app-slint" / "pets" / "default" / "spritesheet.webp").convert("RGBA")
+    frame = sheet.crop((0, 0, 192, 208))
+    frame = frame.crop(frame.getbbox())
+    return frame.resize((round(frame.width * scale), round(frame.height * scale)), Image.LANCZOS)
 
 
 card = Image.new("RGBA", (W, H))
@@ -95,8 +81,8 @@ for i, (text, dx) in enumerate([("您好,请问有什么可以帮您?", 0),
     card = bubble([x0, y0, x0 + d.textlength(text, font=bf) + 40, y0 + 62], text, bf)
 d = ImageDraw.Draw(card)
 
-pet = keyed_sprite(ROOT / "screenshots" / "pet-desktop.png", 3)
-px_, py_ = 964, H - pet.height - 46
+pet = default_pet(2.1)
+px_, py_ = 940, H - pet.height - 46
 card.alpha_composite(pet, (px_, py_))
 # 「已复制 ✓」小气泡贴宠(YaHei 无 ✓ 字形,对勾手绘)
 toast = "已复制"
