@@ -9,11 +9,9 @@ pub const PANEL_W: f32 = 300.0;
 /// 面板高度上下限;下限保证就地编辑器(230)放得下
 pub const PANEL_H: f32 = 400.0;
 pub const PANEL_MIN_H: f32 = 260.0;
-/// 搜索栏 + 分组 Tab 条
-const PANEL_HEADER_H: f32 = 82.0;
-/// 列表末尾「+ 添加」行 / 空分组引导区
-const ADD_ROW_H: f32 = 40.0;
+/// 空分组引导区(提示 + 添加按钮)
 const EMPTY_STATE_H: f32 = 120.0;
+pub const ADD_LABEL: &str = "+ 添加";
 pub const LIST_PAD: f32 = 10.0;
 pub const GAP: f32 = 6.0;
 const CHIP_PAD_X: f32 = 12.0;
@@ -54,6 +52,10 @@ pub struct LaidItem {
     pub is_chip: bool,
 }
 
+fn chip_w(text: &str, avail: f32) -> f32 {
+    (estimate_text_width(text, FONT_PX) + CHIP_PAD_X * 2.0).min(avail)
+}
+
 struct Ctx {
     items: Vec<LaidItem>,
     cursor_x: f32,
@@ -86,7 +88,7 @@ impl Ctx {
     }
 
     fn push_chip(&mut self, gi: usize, pi: usize, text: &str) {
-        let w = (estimate_text_width(text, FONT_PX) + CHIP_PAD_X * 2.0).min(self.avail);
+        let w = chip_w(text, self.avail);
         self.newline_if_needed(w);
         self.items.push(LaidItem {
             group_idx: gi,
@@ -175,14 +177,55 @@ pub fn content_height(items: &[LaidItem]) -> f32 {
     items.iter().map(|i| i.y + i.h).fold(0.0, f32::max)
 }
 
-/// 面板随内容定高(逻辑像素):显示前算一次,内容少时不留大片空白
-pub fn panel_height(items: &[LaidItem]) -> f32 {
-    let list = if items.is_empty() {
-        EMPTY_STATE_H
+/// 面板列表区排版结果
+pub struct PanelLayout {
+    pub items: Vec<LaidItem>,
+    /// 搜索态(查询去空白后非空):列表是跨组搜索结果
+    pub searching: bool,
+    /// 列表末「+ 添加」行;搜索态与空分组没有(空分组显示引导区)
+    pub add_row: Option<Rect>,
+    /// 列表总高(含底部留白),即滚动区内容高
+    pub list_h: f32,
+}
+
+/// 面板列表区唯一排版入口:按查询选分组混排/搜索结果,再接末尾「+ 添加」行
+pub fn layout_panel(
+    data: &PhraseData,
+    group_idx: usize,
+    query: &str,
+    avail_w: f32,
+    by_use: bool,
+) -> PanelLayout {
+    let searching = !query.trim().is_empty();
+    let items = if searching {
+        layout_search(data, query, avail_w)
     } else {
-        content_height(items) + ADD_ROW_H
+        layout_group(data, group_idx, avail_w, by_use)
     };
-    (PANEL_HEADER_H + list + LIST_PAD * 2.0).clamp(PANEL_MIN_H, PANEL_H)
+    let content = content_height(&items);
+    let add_row = (!searching && !items.is_empty()).then(|| Rect {
+        x: 0.0,
+        y: content + GAP,
+        w: chip_w(ADD_LABEL, avail_w),
+        h: CHIP_H,
+    });
+    let list = match add_row {
+        Some(r) => r.y + r.h + GAP,
+        None if items.is_empty() && !searching => EMPTY_STATE_H,
+        None => content,
+    };
+    PanelLayout {
+        items,
+        searching,
+        add_row,
+        list_h: list + LIST_PAD * 2.0,
+    }
+}
+
+/// 面板随内容定高(逻辑像素):显示前算一次,内容少时不留大片空白。
+/// header_h(搜索栏 + 分组 Tab 条)由 Slint 布局给出
+pub fn panel_height(header_h: f32, list_h: f32) -> f32 {
+    (header_h + list_h).clamp(PANEL_MIN_H, PANEL_H)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -296,12 +339,31 @@ mod tests {
     }
 
     #[test]
-    fn panel_height_fits_content_within_bounds() {
-        assert_eq!(panel_height(&[]), PANEL_MIN_H, "空分组取下限");
-        let few = layout_group(&data(), 0, 280.0, false);
-        let h = panel_height(&few);
+    fn panel_layout_add_row_and_height() {
+        const HEADER_H: f32 = 82.0;
+        let few = layout_panel(&data(), 0, "", 280.0, false);
+        let add = few.add_row.expect("分组列表末尾有「+ 添加」");
+        assert_eq!((add.x, add.y), (0.0, content_height(&few.items) + GAP));
+        assert_eq!(few.list_h, add.y + add.h + GAP + LIST_PAD * 2.0);
+        let h = panel_height(HEADER_H, few.list_h);
         assert!(h > PANEL_MIN_H && h < PANEL_H, "少量内容介于上下限:{h}");
+
+        let found = layout_panel(&data(), 0, "好的", 280.0, false);
+        assert!(found.searching && found.add_row.is_none(), "搜索态不给添加");
+        // 纯空白查询不算搜索:照常显示分组与添加行
+        let blank = layout_panel(&data(), 0, "  ", 280.0, false);
+        assert!(!blank.searching && blank.add_row.is_some());
+
         let mut d = data();
+        d.groups[0].phrases.clear();
+        let empty = layout_panel(&d, 0, "", 280.0, false);
+        assert!(empty.add_row.is_none(), "空分组显示引导区而非添加行");
+        assert_eq!(
+            panel_height(HEADER_H, empty.list_h),
+            PANEL_MIN_H,
+            "空分组取下限"
+        );
+
         d.groups[0].phrases = (0..60)
             .map(|i| {
                 Phrase::new(
@@ -310,8 +372,9 @@ mod tests {
                 )
             })
             .collect();
+        let many = layout_panel(&d, 0, "", 280.0, false);
         assert_eq!(
-            panel_height(&layout_group(&d, 0, 280.0, false)),
+            panel_height(HEADER_H, many.list_h),
             PANEL_H,
             "超出取上限滚动"
         );

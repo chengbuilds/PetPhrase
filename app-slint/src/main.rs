@@ -896,19 +896,16 @@ fn schedule_frame(app: &Rc<App>, delay_ms: u32) {
 const LIST_AVAIL_W: f32 = logic::PANEL_W - logic::LIST_PAD * 2.0;
 
 fn refresh_panel(app: &Rc<App>) {
-    let (tabs, items, content_h, show_grid) = {
+    let (tabs, layout, show_grid) = {
         let st = app.state.borrow();
         let query = app.panel.get_search_text().to_string();
-        let items = if query.trim().is_empty() {
-            logic::layout_group(
-                &st.data,
-                st.active_group,
-                LIST_AVAIL_W,
-                st.settings.sort_by_use,
-            )
-        } else {
-            logic::layout_search(&st.data, &query, LIST_AVAIL_W)
-        };
+        let layout = logic::layout_panel(
+            &st.data,
+            st.active_group,
+            &query,
+            LIST_AVAIL_W,
+            st.settings.sort_by_use,
+        );
         let tabs: Vec<TabUi> = st
             .data
             .groups
@@ -921,12 +918,12 @@ fn refresh_panel(app: &Rc<App>) {
                 active: i == st.active_group,
             })
             .collect();
-        let h = logic::content_height(&items);
         let show_grid = st.data.groups.len() > 4;
-        (tabs, items, h, show_grid)
+        (tabs, layout, show_grid)
     };
 
-    let ui_items: Vec<PanelItemUi> = items
+    let ui_items: Vec<PanelItemUi> = layout
+        .items
         .iter()
         .map(|it| PanelItemUi {
             text: it.text.clone().into(),
@@ -938,11 +935,25 @@ fn refresh_panel(app: &Rc<App>) {
             is_chip: it.is_chip,
         })
         .collect();
+    // h = 0 即不显示
+    let add_row = layout
+        .add_row
+        .map_or_else(PanelItemUi::default, |r| PanelItemUi {
+            text: logic::ADD_LABEL.into(),
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+            is_chip: true,
+            ..Default::default()
+        });
 
-    app.state.borrow_mut().items = items;
+    app.state.borrow_mut().items = layout.items;
     app.panel.set_tabs(ModelRc::new(VecModel::from(tabs)));
     app.panel.set_items(ModelRc::new(VecModel::from(ui_items)));
-    app.panel.set_content_h(content_h);
+    app.panel.set_add_row(add_row);
+    app.panel.set_searching(layout.searching);
+    app.panel.set_list_h(layout.list_h);
     app.panel.set_show_grid_btn(show_grid);
     app.panel.set_copied_idx(-1);
     app.panel.set_failed_idx(-1);
@@ -1300,7 +1311,7 @@ fn show_panel(app: &Rc<App>) {
     app.panel.invoke_reset_scroll();
     refresh_panel(app);
     // 显示前按内容一次性定高,再按实际高度贴宠定位
-    let h = logic::panel_height(&app.state.borrow().items);
+    let h = logic::panel_height(app.panel.get_header_h(), app.panel.get_list_h());
     app.panel.set_panel_h(h);
     let Some(placement) = compute_panel_placement(app) else {
         dbg_log("show_panel: no placement (pet native window missing?)");
@@ -2491,6 +2502,23 @@ fn quit_app(a: &Rc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// show_panel 在面板显示前读 header-h 定高:布局属性必须不依赖窗口已显示。
+    /// 本进程只有这一个测试碰 Slint 平台(set_platform 全局只能设一次)
+    #[test]
+    fn panel_header_height_is_known_before_show() {
+        use slint::platform::{software_renderer::MinimalSoftwareWindow, Platform, WindowAdapter};
+        struct Headless;
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(Default::default()))
+            }
+        }
+        slint::platform::set_platform(Box::new(Headless)).unwrap();
+        let panel = PanelWindow::new().unwrap();
+        let h = panel.get_header_h();
+        assert!(h > 0.0 && h < logic::PANEL_MIN_H, "表头高 {h}");
+    }
 
     #[test]
     fn tray_double_click_toggles_once() {
