@@ -77,12 +77,15 @@ component PetCard inherits Rectangle {
         padding: 8px;
         spacing: 4px;
         alignment: center;
-        // thumb 已是 Rust 侧预裁好的单帧,无需 source-clip
-        if pet.err == "": Image {
-            source: pet.thumb;
-            width: 72px;
-            height: 78px;
-            image-fit: contain;
+        // thumb 已是 Rust 侧预裁好的单帧,无需 source-clip;定宽元素在纵向布局里默认靠左,包一层居中
+        if pet.err == "": HorizontalLayout {
+            alignment: center;
+            Image {
+                source: pet.thumb;
+                width: 72px;
+                height: 78px;
+                image-fit: contain;
+            }
         }
         Text {
             text: pet.name;
