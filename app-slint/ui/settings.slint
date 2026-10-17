@@ -210,7 +210,7 @@ export component SettingsWindow inherits Window {
     // 面板按使用频率排序
     in-out property <bool> sort-by-use;
     callback sort-toggled(bool);
-    // 单槽删除撤销(短语),8s 内有效
+    // 单槽删除撤销(短语/分组),main.rs UNDO_SECS 内有效
     in property <bool> can-undo;
     callback undo-delete;
 
@@ -221,6 +221,7 @@ export component SettingsWindow inherits Window {
     in property <bool> update-available;
     in property <bool> update-busy;
     in-out property <bool> auto-check-on;
+    in property <string> auto-check-desc;
     callback check-update;
     callback do-update;
     callback auto-check-toggled(bool);
@@ -1038,7 +1039,7 @@ export component SettingsWindow inherits Window {
                     SettingRow {
                         icon: @image-url("icons/clock.svg");
                         title: "自动检查更新";
-                        desc: "启动 10 秒后检查一次,之后每天一次";
+                        desc: root.auto-check-desc;
                         ToggleSwitch {
                             on: root.auto-check-on;
                             toggled(v) => {

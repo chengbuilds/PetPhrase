@@ -10,11 +10,12 @@ const COLUMNS: u32 = 8;
 const ANIM_ROWS: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// 左/右跑保留以与上游状态表一一对应;拖动时系统拖窗模态循环会冻结 Slint 定时器,播不了
-#[allow(dead_code)]
 pub enum PetState {
     Idle,
+    // 左/右跑保留以与上游状态表一一对应;拖动时系统拖窗模态循环会冻结 Slint 定时器,播不了
+    #[allow(dead_code)]
     RunRight,
+    #[allow(dead_code)]
     RunLeft,
     Wave,
     Jump,
@@ -118,7 +119,7 @@ impl Atlas {
     }
 }
 
-/// 两层状态:base 是持续情境(闲置/等待/审阅/拖动跑步)的循环动画,
+/// 两层状态:base 是持续情境(闲置/等待/审阅)的循环动画,
 /// play_once 的一次性动作(挥手/失败/彩蛋)播完回到 base
 pub struct Animator {
     rows: u32,

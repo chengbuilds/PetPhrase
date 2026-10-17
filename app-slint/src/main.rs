@@ -239,6 +239,9 @@ enum Deleted {
 
 /// 撤销窗口:足够点到横幅,又不至于挡着后续操作
 const UNDO_SECS: u64 = 3;
+/// 自动检查更新:启动后首查延迟、此后重查间隔(设置页说明文字也由此生成)
+const UPDATE_FIRST_CHECK_SECS: u64 = 10;
+const UPDATE_RECHECK_HOURS: u64 = 24;
 
 /// 设置窗确认框待执行动作(泛化:同一个框服务多种危险操作)。
 /// 目标一律随动作存下:确认框开着时界面状态(如当前分组)可能已变
@@ -538,13 +541,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     schedule_frame(&app, 0);
     wire_tray_events();
 
-    // 启动 10s 后静默检查一次更新;此后每 24h 重查一次
+    // 启动后静默检查一次更新,此后定期重查
     // (开机自启用户一挂数周,只查启动那一次等于永远不查)
     {
         let a = app.clone();
         app.update_timer.start(
             slint::TimerMode::SingleShot,
-            Duration::from_secs(10),
+            Duration::from_secs(UPDATE_FIRST_CHECK_SECS),
             move || {
                 if a.state.borrow().settings.auto_check_update {
                     start_update_check(&a, false);
@@ -552,7 +555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let a2 = a.clone();
                 a.update_timer.start(
                     slint::TimerMode::Repeated,
-                    Duration::from_secs(24 * 3600),
+                    Duration::from_secs(UPDATE_RECHECK_HOURS * 3600),
                     move || {
                         if a2.state.borrow().settings.auto_check_update {
                             start_update_check(&a2, false);
@@ -789,7 +792,7 @@ fn wire_pet(app: &Rc<App>) {
 }
 
 /// 持续情境 → 动画 base:编辑审阅 > 面板等待 > 闲置。
-/// 面板显隐/编辑器开关/拖动状态变化后调用,情境只在这里判定
+/// 面板显隐/编辑器开关/换动画机后调用,情境只在这里判定
 fn update_pet_base(app: &Rc<App>) {
     let panel_open = app.panel.window().is_visible();
     let base = if panel_open && app.panel.get_editor_open() {
@@ -1912,6 +1915,12 @@ fn wire_settings(app: &Rc<App>) {
         .set_app_version(updater::CURRENT_VERSION.into());
     app.settings_win
         .set_auto_check_on(app.state.borrow().settings.auto_check_update);
+    app.settings_win.set_auto_check_desc(
+        format!(
+            "启动 {UPDATE_FIRST_CHECK_SECS} 秒后检查一次,之后每 {UPDATE_RECHECK_HOURS} 小时一次"
+        )
+        .into(),
+    );
     app.settings_win
         .set_sort_by_use(app.state.borrow().settings.sort_by_use);
     app.settings_win
