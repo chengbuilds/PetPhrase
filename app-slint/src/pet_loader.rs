@@ -188,8 +188,9 @@ mod tests {
     #[test]
     fn skips_install_staging_dirs() {
         let root = tempdir().unwrap();
-        make_pet(root.path(), "kun-like", Some("{}"), Some("spritesheet.webp"));
-        make_pet(root.path(), ".kun-like.part", Some("{}"), Some("spritesheet.webp"));
+        for id in ["kun-like", ".kun-like.part"] {
+            make_pet(root.path(), id, Some("{}"), Some("spritesheet.webp"));
+        }
         make_pet(root.path(), ".kun-like.old", Some("{}"), None);
         let pets = scan_pets(&[root.path()]);
         assert_eq!(pets.len(), 1);

@@ -817,18 +817,23 @@ fn refresh_pet_sprite(app: &Rc<App>) {
             .collect() // 选中宠在首位,可能重复一次,解码成功即返回无所谓
     };
     for path in &candidates {
-        if let Some((img, atlas)) = try_load_sheet(path) {
-            app.state.borrow_mut().animator = Animator::new(atlas.anim_rows());
-            update_pet_base(app); // 新动画机从 idle 起步,补回当前情境
-            app.pet.set_cell_w(atlas.cell_w as i32);
-            app.pet.set_cell_h(atlas.cell_h as i32);
-            app.pet.set_sheet(img);
-            app.pet.set_missing(false);
+        if let Some(sheet) = try_load_sheet(path) {
+            show_sheet(app, sheet);
             return;
         }
     }
     app.pet.set_missing(true);
     app.pet.set_sheet(slint::Image::default());
+}
+
+/// 把解码好的雪碧图装上桌宠(启动/回退/选宠共用)
+fn show_sheet(app: &Rc<App>, (img, atlas): (slint::Image, anim::Atlas)) {
+    app.state.borrow_mut().animator = Animator::new(atlas.anim_rows());
+    update_pet_base(app); // 新动画机从 idle 起步,补回当前情境
+    app.pet.set_cell_w(atlas.cell_w as i32);
+    app.pet.set_cell_h(atlas.cell_h as i32);
+    app.pet.set_sheet(img);
+    app.pet.set_missing(false);
 }
 
 /// 应用缩放并移窗,锚定底边中点——宠的「脚」原地不动。
@@ -1683,8 +1688,8 @@ fn wire_settings(app: &Rc<App>) {
     let a = app.clone();
     app.settings_win.on_pet_selected(move |i| {
         let id = a.state.borrow().pets.get(i as usize).map(|p| p.id.clone());
-        if let Some(id) = id {
-            select_pet(&a, &id);
+        if let Some(Err(e)) = id.map(|id| select_pet(&a, &id)) {
+            set_data_msg(&a, &format!("⚠ {e}"), true);
         }
     });
 
@@ -1916,30 +1921,25 @@ fn wire_settings(app: &Rc<App>) {
     }
 }
 
-/// 选宠唯一入口(本地卡片/宠物库「使用」/安装后自动切换共用)。
-/// 扫描期只验文件存在;真解码成功才落选择,否则设置显示已换、桌面还是旧宠
-fn select_pet(app: &Rc<App>, id: &str) -> bool {
-    let sheet = {
+/// 选宠唯一入口(本地卡片/宠物库「使用」/安装后自动切换/删除后回退共用)。
+/// 扫描期只验文件存在;真解码成功才落选择,否则设置显示已换、桌面还是旧宠。
+/// 解码结果直接装上桌宠,整张图只解码这一次;Err 为给用户看的原因
+fn select_pet(app: &Rc<App>, id: &str) -> Result<(), String> {
+    let path = {
         let st = app.state.borrow();
-        match st.pets.iter().find(|p| p.id == id && p.error.is_none()) {
-            Some(p) => p.spritesheet.clone(),
-            None => return false,
-        }
+        st.pets
+            .iter()
+            .find(|p| p.id == id && p.error.is_none())
+            .map(|p| p.spritesheet.clone())
+            .ok_or("该宠物已不可用")?
     };
-    if try_load_sheet(&sheet).is_none() {
-        set_data_msg(
-            app,
-            "⚠ 该宠物雪碧图无法解码(文件损坏?),已保留当前选择",
-            true,
-        );
-        return false;
-    }
+    let sheet = try_load_sheet(&path).ok_or("该宠物雪碧图无法解码(文件损坏?),已保留当前选择")?;
     app.state.borrow_mut().settings.pet_id = id.to_string();
     persist_settings(app);
-    refresh_pet_sprite(app);
+    show_sheet(app, sheet);
     refresh_pet_cards(app);
     refresh_gallery(app);
-    true
+    Ok(())
 }
 
 /// 只允许删装在 petdex 标准目录里的包;内置宠与用户自定义目录里的文件不归我们管
@@ -1974,7 +1974,7 @@ fn delete_pet(app: &Rc<App>, id: &str) {
             .find(|p| p.error.is_none())
             .map(|p| p.id.clone());
         if let Some(next) = next {
-            select_pet(app, &next);
+            let _ = select_pet(app, &next);
         } else {
             refresh_pet_sprite(app); // 一只不剩:显示缺失占位
         }
@@ -2162,7 +2162,9 @@ fn gallery_install(app: &Rc<App>, idx: usize) {
         .iter()
         .any(|p| p.id == pet.slug && p.error.is_none());
     if installed {
-        select_pet(app, &pet.slug);
+        if let Err(e) = select_pet(app, &pet.slug) {
+            set_data_msg(app, &format!("⚠ {e}"), true);
+        }
         return;
     }
     if !app.state.borrow_mut().installing.insert(pet.slug.clone()) {
@@ -2177,8 +2179,11 @@ fn gallery_install(app: &Rc<App>, idx: usize) {
                 match result {
                     Ok(()) => {
                         refresh_pets(a);
-                        if select_pet(a, &pet.slug) {
-                            set_data_msg(a, &format!("已安装并切换到「{}」✓", pet.name), false);
+                        match select_pet(a, &pet.slug) {
+                            Ok(()) => {
+                                set_data_msg(a, &format!("已安装并切换到「{}」✓", pet.name), false)
+                            }
+                            Err(e) => set_data_msg(a, &format!("⚠ {e}"), true),
                         }
                     }
                     Err(e) => {
