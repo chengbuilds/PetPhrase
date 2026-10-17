@@ -34,8 +34,10 @@ Section "Install"
   SetOutPath "$INSTDIR"
   File "target\release\PetPhrase.exe"
   SetOutPath "$INSTDIR\pets\default"
+  ; 0.8.0 起默认宠换成 spritesheet.webp,清掉覆盖安装残留的旧 Mochi 图
+  Delete "$INSTDIR\pets\default\spritesheet.png"
   File "pets\default\pet.json"
-  File "pets\default\spritesheet.png"
+  File "pets\default\spritesheet.webp"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 

@@ -1,0 +1,259 @@
+<!doctype html>
+<!--
+  内置默认宠(显示名 PetPhrase)雪碧图的唯一绘制源(白色玻璃泡 + 七彩流光边,参考 iOS 18 Siri)。
+  规格:1536×1872 = 8 列 × 9 行,单格 192×208;行序/帧数照搬 app-slint/src/anim.rs(上游 pet-states.ts)。
+  双击打开可预览整张图;导出走 scripts/gen_default_pet.py(无头 Edge 读 #out 里的 data URL 落盘)。
+  输出有损 WebP q0.9:PNG 1.7MB(柔光渐变压不动),q0.9 约 440KB,放大 3 倍与 PNG 肉眼无差。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>默认宠 · PetPhrase 雪碧图</title>
+<style>
+  body { margin:0; padding:16px; background:#f8fafc; font:13px "Microsoft YaHei UI",sans-serif; color:#475569; }
+  canvas { width:1536px; border:1px solid #e2e8f0; background:repeating-conic-gradient(#f1f5f9 0 25%,#fff 0 50%) 0 0/16px 16px; }
+  #out { display:none; }
+</style>
+</head>
+<body>
+<div>行:0 待机 · 1 向右跑 · 2 向左跑 · 3 挥手 · 4 跳 · 5 失败 · 6 等待 · 7 工作中 · 8 审阅</div>
+<canvas id="sheet"></canvas>
+<pre id="out"></pre>
+<script>
+const W = 192, H = 208, GROUND = 194, R = 54;
+const TAU = Math.PI * 2;
+const ACCENT = '#f472b6';
+// 每行帧数 = anim.rs 状态表
+const STATES = [
+  ['idle', 6], ['runR', 8], ['runL', 8], ['wave', 4], ['jump', 5],
+  ['failed', 8], ['waiting', 6], ['run', 6], ['review', 6],
+];
+
+/* ---------- 动作姿态 ---------- */
+function pose(key, f, n) {
+  const p = { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0, dim: 0, mirror: false,
+              eyes: { shape: 'normal', open: 1, lx: 0, ly: 0 }, fx: [] };
+  const t = f / n;
+  switch (key) {
+    case 'idle': {
+      const s = Math.sin(TAU * t);
+      p.sy = 1 + 0.03 * s; p.sx = 1 - 0.022 * s;
+      p.eyes.open = f === 1 ? 0.12 : f === 2 ? 0.6 : 1;
+      break;
+    }
+    case 'runL': p.mirror = true; // fallthrough
+    case 'runR': {
+      const b = Math.abs(Math.sin(TAU * t));
+      p.dy = -12 * b; p.sy = 1 - 0.07 * (1 - b) + 0.03 * b; p.sx = 1 + 0.06 * (1 - b);
+      p.rot = 0.13; p.eyes.lx = 0.45; p.fx.push(['speed', f]);
+      break;
+    }
+    case 'wave': {
+      p.rot = [0.05, -0.03, 0.05, 0][f];
+      p.eyes.shape = 'happy';
+      p.fx.push(['hand', [-0.75, 0.25, -0.75, -0.2][f]]);
+      break;
+    }
+    case 'jump': {
+      p.dy = [0, -18, -36, -18, 0][f];
+      p.sy = [0.84, 1.12, 1.0, 1.06, 0.9][f];
+      p.sx = [1.14, 0.9, 1.0, 0.95, 1.1][f];
+      p.eyes.shape = f === 0 ? 'squint' : f === 4 ? 'normal' : 'happy';
+      if (f === 2) p.fx.push(['spark', 0]);
+      break;
+    }
+    case 'failed': {
+      const k = f / (n - 1);
+      p.dx = [-5, 5, -4, 3, 0, 0, 0, 0][f];
+      p.sy = 1 - 0.17 * k; p.sx = 1 + 0.09 * k; p.dim = 0.8 * k;
+      p.eyes.shape = f >= 2 ? 'x' : 'sad'; p.eyes.ly = 0.3;
+      if (f >= 2) p.fx.push(['sweat', f - 2]);
+      break;
+    }
+    case 'waiting': {
+      p.rot = 0.07 * Math.sin(TAU * t);
+      p.eyes.ly = -0.5; p.eyes.lx = 0.35 * Math.sin(TAU * t);
+      p.fx.push(['dots', (f % 3) + 1]);
+      break;
+    }
+    case 'run': { // 上游 row 7 实为「工作中」
+      p.dx = [1.5, -1.5, 1.5, -1.5, 1, 0][f];
+      p.sy = f % 2 ? 1.02 : 0.99;
+      p.eyes.shape = 'focus'; p.eyes.ly = 0.25;
+      p.fx.push(['orbit', t]);
+      break;
+    }
+    case 'review': {
+      const k = f / (n - 1);
+      p.rot = -0.04 + 0.08 * k;
+      p.eyes.shape = 'review'; p.eyes.lx = -0.5 + k; p.eyes.ly = 0.2;
+      p.fx.push(['glass', k]);
+      break;
+    }
+  }
+  return p;
+}
+
+/* ---------- 小工具 ---------- */
+function ell(ctx, x, y, rx, ry) { ctx.beginPath(); ctx.ellipse(x, y, Math.max(rx, .1), Math.max(ry, .1), 0, 0, TAU); }
+function capsule(ctx, x, y, w, h) {
+  const r = Math.min(w, h) / 2; ctx.beginPath(); ctx.roundRect(x - w / 2, y - h / 2, w, h, r);
+}
+function desat(p, extra = '') { return (p.dim ? `saturate(${1 - p.dim}) brightness(${1 - p.dim * 0.25}) ` : '') + extra || 'none'; }
+function star(ctx, x, y, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, rr = i % 2 ? r * 0.35 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+  ctx.closePath(); ctx.fill();
+}
+
+/* ---------- 形象:身体 / 脸 / 小手 ---------- */
+function body(ctx, p) {
+  const cy = -R;
+  ctx.save(); ctx.filter = desat(p);
+  ctx.shadowColor = `rgba(244,114,182,${0.35 * (1 - p.dim)})`; ctx.shadowBlur = 14;
+  const g = ctx.createRadialGradient(-R * .3, cy - R * .35, 2, 0, cy, R);
+  g.addColorStop(0, '#ffffff'); g.addColorStop(.75, '#f5f3ff'); g.addColorStop(1, '#e9e5ff');
+  ell(ctx, 0, cy, R, R); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  // 内部彩雾随帧旋转
+  ctx.save(); ell(ctx, 0, cy, R, R); ctx.clip();
+  ctx.filter = desat(p, 'blur(13px)');
+  const mist = ['#fda4af', '#fdba74', '#7dd3fc', '#c4b5fd'];
+  const ph = (p.phase || 0) * TAU;
+  mist.forEach((c, i) => {
+    const a = ph + i * TAU / 4;
+    ctx.globalAlpha = 0.5 * (1 - p.dim);
+    ell(ctx, Math.cos(a) * R * 0.62, cy + Math.sin(a) * R * 0.62, R * 0.42, R * 0.42); ctx.fillStyle = c; ctx.fill();
+  });
+  ctx.restore();
+  // 七彩流光边
+  ctx.save(); ctx.filter = desat(p, 'blur(1.2px)');
+  const cg = ctx.createConicGradient(ph, 0, cy);
+  ['#f472b6', '#fb923c', '#facc15', '#34d399', '#22d3ee', '#818cf8', '#f472b6'].forEach((c, i, a) => cg.addColorStop(i / (a.length - 1), c));
+  ctx.strokeStyle = cg; ctx.lineWidth = 4.5; ctx.globalAlpha = 1 - p.dim * 0.6;
+  ell(ctx, 0, cy, R - 2.2, R - 2.2); ctx.stroke(); ctx.restore();
+  ctx.save(); ctx.fillStyle = 'rgba(255,255,255,.85)'; ell(ctx, -R * .38, cy - R * .5, R * .2, R * .12); ctx.fill(); ctx.restore();
+}
+
+function face(ctx, p) {
+  const e = p.eyes, ex = R * 0.32, ey = -R * 1.02, w = 8, h = 15;
+  const lx = e.lx * R * 0.14, ly = e.ly * R * 0.12;
+  ctx.save();
+  ctx.fillStyle = '#334155'; ctx.strokeStyle = '#334155'; ctx.lineCap = 'round';
+  for (const side of [-1, 1]) {
+    const x = side * ex + lx, y = ey + ly;
+    switch (e.shape) {
+      case 'happy':
+        ctx.lineWidth = w * 0.62; ctx.beginPath();
+        ctx.moveTo(x - w * 0.95, y + h * 0.12); ctx.quadraticCurveTo(x, y - h * 0.62, x + w * 0.95, y + h * 0.12); ctx.stroke();
+        break;
+      case 'x':
+        ctx.lineWidth = w * 0.45; ctx.beginPath();
+        ctx.moveTo(x - w * 0.7, y - w * 0.7); ctx.lineTo(x + w * 0.7, y + w * 0.7);
+        ctx.moveTo(x + w * 0.7, y - w * 0.7); ctx.lineTo(x - w * 0.7, y + w * 0.7); ctx.stroke();
+        break;
+      case 'squint':
+        ctx.lineWidth = w * 0.55; ctx.beginPath(); ctx.moveTo(x - w * 0.8, y); ctx.lineTo(x + w * 0.8, y); ctx.stroke();
+        break;
+      case 'focus': // 上眼睑压平:专注
+        ctx.beginPath(); ctx.ellipse(x, y, w / 2, h * 0.36, 0, 0, Math.PI); ctx.fill();
+        break;
+      case 'review': // 一只眯、一只睁大
+        if (side < 0) { ctx.lineWidth = w * 0.55; ctx.beginPath(); ctx.moveTo(x - w * 0.8, y); ctx.lineTo(x + w * 0.8, y + 1); ctx.stroke(); }
+        else { capsule(ctx, x, y, w * 1.12, h * 1.12); ctx.fill(); }
+        break;
+      case 'sad':
+        capsule(ctx, x, y + 1, w, h * 0.8); ctx.fill();
+        ctx.lineWidth = 2.2; ctx.beginPath(); ctx.moveTo(x - side * w * 0.9, y - h * 1.0); ctx.lineTo(x + side * w * 0.6, y - h * 0.7); ctx.stroke(); // 内高外低 = 委屈
+        break;
+      default:
+        capsule(ctx, x, y, w, h * e.open); ctx.fill();
+        if (e.open > 0.5) { ctx.save(); ctx.fillStyle = '#fff'; ell(ctx, x + w * 0.18, y - h * 0.22, w * 0.2, w * 0.2); ctx.fill(); ctx.restore(); }
+    }
+  }
+  ctx.restore();
+  if (e.shape !== 'x') { // 腮红
+    ctx.save(); ctx.filter = 'blur(2.5px)'; ctx.fillStyle = 'rgba(251,113,133,.45)';
+    for (const s of [-1, 1]) { ell(ctx, s * R * 0.52, -R * 0.8, 8, 5); ctx.fill(); }
+    ctx.restore();
+  }
+}
+
+function mini(ctx, x, y, r) {
+  ctx.save(); ell(ctx, x, y, r, r); ctx.fillStyle = '#fff'; ctx.fill();
+  const cg = ctx.createConicGradient(0, x, y);
+  ['#f472b6', '#fb923c', '#22d3ee', '#818cf8', '#f472b6'].forEach((c, i, a) => cg.addColorStop(i / (a.length - 1), c));
+  ctx.strokeStyle = cg; ctx.lineWidth = 2.5; ctx.stroke(); ctx.restore();
+}
+
+/* ---------- 动作特效(手、汗、气泡、放大镜……) ---------- */
+function fxBehind(ctx, p) {
+  for (const [k, a] of p.fx) if (k === 'speed') {
+    ctx.save(); ctx.strokeStyle = ACCENT; ctx.lineCap = 'round';
+    for (let i = 0; i < 3; i++) {
+      const o = ((a * 7 + i * 13) % 20);
+      ctx.globalAlpha = 0.55 - i * 0.12; ctx.lineWidth = 4 - i;
+      ctx.beginPath(); ctx.moveTo(-R - 26 - o, -R * (0.5 + i * 0.4)); ctx.lineTo(-R - 8 - o, -R * (0.5 + i * 0.4)); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+function fxFront(ctx, p) {
+  for (const [k, a] of p.fx) {
+    ctx.save();
+    if (k === 'hand') { // 身体坐标系:右侧小手
+      mini(ctx, R * 0.98 + Math.cos(a) * 8, -R * 0.95 + Math.sin(a) * 16, 11);
+    } else if (k === 'sweat') {
+      const y = -R * 1.75 + a * 3.5;
+      ctx.fillStyle = '#7dd3fc'; ctx.beginPath(); ctx.moveTo(R * 0.72, y - 9);
+      ctx.quadraticCurveTo(R * 0.72 + 7, y + 2, R * 0.72, y + 4); ctx.quadraticCurveTo(R * 0.72 - 7, y + 2, R * 0.72, y - 9); ctx.fill();
+    } else if (k === 'dots') {
+      ctx.fillStyle = 'rgba(255,255,255,.95)'; ctx.shadowColor = 'rgba(15,23,42,.18)'; ctx.shadowBlur = 6;
+      ctx.beginPath(); ctx.roundRect(R * 0.25, -R * 2.42, 46, 24, 12); ctx.fill(); ctx.shadowBlur = 0;
+      ctx.fillStyle = ACCENT;
+      for (let i = 0; i < a; i++) { ell(ctx, R * 0.25 + 12 + i * 11, -R * 2.42 + 12, 3.4, 3.4); ctx.fill(); }
+    } else if (k === 'orbit') {
+      ctx.fillStyle = ACCENT;
+      for (let i = 0; i < 3; i++) {
+        const ang = a * TAU + i * TAU / 3;
+        star(ctx, Math.cos(ang) * R * 1.22, -R + Math.sin(ang) * R * 0.42, i === 0 ? 5 : 3.5);
+      }
+    } else if (k === 'glass') {
+      const gx = -R * 0.55 + a * R * 1.1, gy = -R * 0.98;
+      ctx.lineWidth = 3.2; ctx.strokeStyle = '#475569';
+      ctx.fillStyle = 'rgba(186,230,253,.35)'; ell(ctx, gx, gy, 12, 12); ctx.fill(); ctx.stroke();
+      ctx.lineCap = 'round'; ctx.lineWidth = 4.5; ctx.beginPath(); ctx.moveTo(gx + 8.5, gy + 8.5); ctx.lineTo(gx + 17, gy + 17); ctx.stroke();
+    } else if (k === 'spark') {
+      ctx.fillStyle = ACCENT; star(ctx, -R * 0.95, -R * 1.9, 5); star(ctx, R * 0.95, -R * 1.75, 4); star(ctx, 0, -R * 2.25, 3.5);
+    }
+    ctx.restore();
+  }
+}
+
+/* ---------- 单帧绘制 ---------- */
+function drawFrame(ctx, key, f, n, ox, oy) {
+  const p = pose(key, f, n);
+  p.phase = f / n;
+  ctx.save(); ctx.translate(ox, oy);
+  ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+  const lift = Math.min(1, -p.dy / 40);
+  ctx.save(); ctx.filter = 'blur(2px)'; ctx.fillStyle = `rgba(15,23,42,${0.16 * (1 - lift * 0.5)})`;
+  ell(ctx, W / 2 + p.dx, GROUND + 1, R * 0.78 * (1 - lift * 0.35), 5.5); ctx.fill(); ctx.restore();
+  ctx.translate(W / 2 + p.dx, GROUND + p.dy);
+  if (p.mirror) ctx.scale(-1, 1);
+  ctx.rotate(p.rot); ctx.scale(p.sx, p.sy);
+  fxBehind(ctx, p);
+  body(ctx, p);
+  face(ctx, p);
+  fxFront(ctx, p);
+  ctx.restore();
+}
+
+const c = document.getElementById('sheet');
+c.width = W * 8; c.height = H * 9;
+const ctx = c.getContext('2d');
+STATES.forEach(([key, n], row) => { for (let f = 0; f < n; f++) drawFrame(ctx, key, f, n, f * W, row * H); });
+document.getElementById('out').textContent = c.toDataURL('image/webp', 0.9);
+</script>
+</body>
+</html>
