@@ -126,6 +126,64 @@ component PetCard inherits Rectangle {
     }
 }
 
+/// 通用页分组标题(外观/行为/数据)
+component SectionTitle inherits VerticalLayout {
+    in property <string> text;
+    padding-top: 14px;
+    padding-bottom: 6px;
+    padding-left: 4px;
+    Text { text: root.text; font-size: 12px; font-weight: 600; color: Theme.text-muted; }
+}
+
+/// 通用页设置行:图标块 + 名称 + 一句说明,控件(children)靠右
+component SettingRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> desc;
+    /// 组内首行不画顶部分隔线
+    in property <bool> first: false;
+    height: 50px;
+    if !root.first: Rectangle { y: 0; height: 1px; background: #eef2f7; }
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 30px;
+                height: 30px;
+                border-radius: 8px;
+                background: #fff7ed;
+                Image { source: root.icon; colorize: Theme.accent; width: 16px; height: 16px; }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text { text: root.title; font-size: 13.5px; font-weight: 600; color: Theme.text-primary; }
+            Text { text: root.desc; font-size: 12px; color: Theme.text-muted; overflow: elide; }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            @children
+        }
+    }
+}
+
+/// 通用页白卡片组(行之间细分隔线由 SettingRow 自带)
+component SettingGroup inherits Rectangle {
+    background: #ffffff;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: 1px;
+        @children
+    }
+}
+
 export component SettingsWindow inherits Window {
     in property <[GroupRowUi]> groups;
     in property <[PhraseRowUi]> phrases;
@@ -845,119 +903,150 @@ export component SettingsWindow inherits Window {
             }
         }
 
-        // ================= 通用页 =================
+        // ================= 通用页(默认窗口尺寸下一屏放下,ScrollView 只兜底缩小窗口) =================
         if root.page == 2: ScrollView {
             vertical-stretch: 1;
             VerticalLayout {
-                padding: 24px;
-                spacing: 10px;
+                padding-left: 24px;
+                padding-right: 24px;
+                padding-top: 14px;
+                padding-bottom: 14px;
                 alignment: start;
 
-                Text { text: "关于与更新"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: start;
-                    Text {
-                        text: "当前版本 v" + root.app-version;
-                        font-size: 12.5px;
-                        color: Theme.text-secondary;
-                        vertical-alignment: center;
-                    }
-                    if !root.update-available: GhostButton {
-                        text: "检查更新";
-                        enabled: !root.update-busy;
-                        clicked => { root.check-update(); }
-                    }
-                    if root.update-available: PrimaryButton {
-                        text: "立即更新";
-                        enabled: !root.update-busy;
-                        clicked => { root.do-update(); }
-                    }
-                    Text {
-                        text: root.update-msg;
-                        font-size: 12px;
-                        color: root.update-msg-error ? Theme.danger : Theme.text-muted;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle { height: 8px; }
-                Text { text: "面板主题"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                SegmentedPair {
-                    left-label: "亚克力磨砂";
-                    right-label: "实底浅色";
-                    right-selected: root.solid-theme;
-                    changed(solid) => { root.theme-toggled(solid); }
-                }
-
-                Rectangle { height: 8px; }
-                Text { text: "图标位置"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                SegmentedPair {
-                    left-label: "系统托盘";
-                    right-label: "任务栏";
-                    right-selected: root.taskbar-mode;
-                    changed(on) => { root.taskbar-toggled(on); }
-                }
-                Text {
-                    text: root.taskbar-mode
-                        ? "单击任务栏按钮显示/隐藏宠物;右键按钮「关闭窗口」退出"
-                        : "左键托盘图标找回宠物,右键打开菜单";
-                    font-size: 12px;
-                    color: Theme.text-muted;
-                }
-
-                Rectangle { height: 8px; }
-                Text { text: "行为"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                HorizontalLayout {
-                    alignment: start;
-                    spacing: 8px;
-                    ToggleSwitch {
-                        on: root.autostart-on;
-                        toggled(v) => {
-                            root.autostart-on = v;
-                            root.autostart-toggled(v);
+                // 关于:图标 + 版本/更新状态,「检查更新」「退出」并排在右
+                Rectangle {
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+                    border-radius: 12px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            alignment: center;
+                            Image { source: @image-url("icon.png"); width: 32px; height: 32px; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text { text: "PetPhrase"; font-size: 14.5px; font-weight: 600; color: Theme.text-primary; }
+                            Text {
+                                text: "版本 " + root.app-version + (root.update-msg == "" ? "" : " · " + root.update-msg);
+                                font-size: 12px;
+                                color: root.update-msg-error ? Theme.danger : Theme.text-muted;
+                                overflow: elide;
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+                            if !root.update-available: GhostButton {
+                                text: "检查更新";
+                                outlined: true;
+                                icon: @image-url("icons/refresh-cw.svg");
+                                enabled: !root.update-busy;
+                                clicked => { root.check-update(); }
+                            }
+                            if root.update-available: PrimaryButton {
+                                text: "立即更新";
+                                enabled: !root.update-busy;
+                                clicked => { root.do-update(); }
+                            }
+                            GhostButton {
+                                text: "退出";
+                                danger: true;
+                                icon: @image-url("icons/power.svg");
+                                clicked => { root.quit-app(); }
+                            }
                         }
                     }
-                    Text { text: "开机自动启动"; vertical-alignment: center; color: Theme.text-secondary; }
-                }
-                HorizontalLayout {
-                    alignment: start;
-                    spacing: 8px;
-                    ToggleSwitch {
-                        on: root.sort-by-use;
-                        toggled(v) => {
-                            root.sort-by-use = v;
-                            root.sort-toggled(v);
-                        }
-                    }
-                    Text { text: "面板按使用频率排序(常用的排前面)"; vertical-alignment: center; color: Theme.text-secondary; }
-                }
-                HorizontalLayout {
-                    alignment: start;
-                    spacing: 8px;
-                    ToggleSwitch {
-                        on: root.auto-check-on;
-                        toggled(v) => {
-                            root.auto-check-on = v;
-                            root.auto-check-toggled(v);
-                        }
-                    }
-                    Text { text: "自动检查更新"; vertical-alignment: center; color: Theme.text-secondary; }
                 }
 
-                Rectangle { height: 8px; }
-                Text { text: "数据"; font-size: 14px; font-weight: 600; color: Theme.text-primary; }
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: start;
-                    GhostButton { text: "导出常用语…"; icon: @image-url("icons/download.svg"); clicked => { root.do-export(); } }
-                    GhostButton { text: "导入常用语…"; icon: @image-url("icons/upload.svg"); clicked => { root.do-import(); } }
+                SectionTitle { text: "外观"; }
+                SettingGroup {
+                    SettingRow {
+                        first: true;
+                        icon: @image-url("icons/palette.svg");
+                        title: "面板主题";
+                        desc: "常用语面板的背景效果";
+                        SegmentedPair {
+                            width: 200px;
+                            left-label: "亚克力磨砂";
+                            right-label: "实底浅色";
+                            right-selected: root.solid-theme;
+                            changed(solid) => { root.theme-toggled(solid); }
+                        }
+                    }
+                    SettingRow {
+                        icon: @image-url("icons/monitor.svg");
+                        title: "图标位置";
+                        desc: root.taskbar-mode
+                            ? "单击任务栏按钮显示/隐藏宠物,右键「关闭窗口」退出"
+                            : "左键托盘图标显示/隐藏宠物,右键打开菜单";
+                        SegmentedPair {
+                            width: 200px;
+                            left-label: "系统托盘";
+                            right-label: "任务栏";
+                            right-selected: root.taskbar-mode;
+                            changed(on) => { root.taskbar-toggled(on); }
+                        }
+                    }
                 }
 
-                Rectangle { height: 8px; }
-                HorizontalLayout {
-                    alignment: start;
-                    GhostButton { text: "退出 PetPhrase"; clicked => { root.quit-app(); } }
+                SectionTitle { text: "行为"; }
+                SettingGroup {
+                    SettingRow {
+                        first: true;
+                        icon: @image-url("icons/zap.svg");
+                        title: "开机自动启动";
+                        desc: "登录 Windows 后自动出现桌宠";
+                        ToggleSwitch {
+                            on: root.autostart-on;
+                            toggled(v) => {
+                                root.autostart-on = v;
+                                root.autostart-toggled(v);
+                            }
+                        }
+                    }
+                    SettingRow {
+                        icon: @image-url("icons/arrow-down-wide-narrow.svg");
+                        title: "按使用频率排序";
+                        desc: "面板里常用的短语排在前面";
+                        ToggleSwitch {
+                            on: root.sort-by-use;
+                            toggled(v) => {
+                                root.sort-by-use = v;
+                                root.sort-toggled(v);
+                            }
+                        }
+                    }
+                    SettingRow {
+                        icon: @image-url("icons/clock.svg");
+                        title: "自动检查更新";
+                        desc: "启动 10 秒后检查一次,之后每天一次";
+                        ToggleSwitch {
+                            on: root.auto-check-on;
+                            toggled(v) => {
+                                root.auto-check-on = v;
+                                root.auto-check-toggled(v);
+                            }
+                        }
+                    }
+                }
+
+                SectionTitle { text: "数据"; }
+                SettingGroup {
+                    SettingRow {
+                        first: true;
+                        icon: @image-url("icons/database.svg");
+                        title: "常用语备份";
+                        desc: "导出为 JSON 文件,或从文件导入替换";
+                        GhostButton { text: "导出…"; outlined: true; icon: @image-url("icons/download.svg"); clicked => { root.do-export(); } }
+                        GhostButton { text: "导入…"; outlined: true; icon: @image-url("icons/upload.svg"); clicked => { root.do-import(); } }
+                    }
                 }
             }
         }

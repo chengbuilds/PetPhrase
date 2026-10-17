@@ -114,20 +114,21 @@ export component PrimaryButton inherits Rectangle {
     }
 }
 
-/// 次按钮(浅底)/危险幽灵按钮
+/// 次按钮(浅底)/白底描边(放白卡片上)/危险幽灵按钮
 export component GhostButton inherits Rectangle {
     in property <string> text;
     in property <bool> danger: false;
+    in property <bool> outlined: false;
     in property <bool> enabled: true;
     in property <image> icon;
     callback clicked;
     width: content.preferred-width + 28px;
     height: 34px;
     border-radius: 8px;
-    background: !gta.has-hover ? (danger ? transparent : #f1f5f9)
-        : danger ? #fef2f2 : #e2e8f0;
-    border-width: danger ? 1px : 0;
-    border-color: gta.has-hover ? #fecaca : transparent;
+    background: !gta.has-hover ? (danger ? transparent : outlined ? #ffffff : #f1f5f9)
+        : danger ? #fef2f2 : outlined ? #f1f5f9 : #e2e8f0;
+    border-width: danger || outlined ? 1px : 0;
+    border-color: outlined ? #e2e8f0 : gta.has-hover ? #fecaca : transparent;
     animate background { duration: 150ms; }
     content := HorizontalLayout {
         alignment: center;
