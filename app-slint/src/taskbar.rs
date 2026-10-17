@@ -60,7 +60,11 @@ pub fn set_on_taskbar(w: &winit::window::Window, on: bool) {
             let orig = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, proc as usize as isize);
             SetPropW(hwnd, PROP_ORIG_PROC, orig as _);
         }
-        SetPropW(hwnd, PROP_TOOL, if on { std::ptr::null_mut() } else { 1 as _ });
+        SetPropW(
+            hwnd,
+            PROP_TOOL,
+            if on { std::ptr::null_mut() } else { 1 as _ },
+        );
         // 原样写回,经 WM_STYLECHANGING 套上新策略
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
     }

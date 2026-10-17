@@ -228,9 +228,14 @@ mod tests {
         assert_eq!(pet.error, None);
         let img = image::open(&pet.spritesheet).unwrap().into_rgba8();
         let atlas = Atlas::from_size(img.width(), img.height());
-        assert_eq!((atlas.cell_w, atlas.cell_h, atlas.rows), (FRAME_W, FRAME_H, ANIM_ROWS));
+        assert_eq!(
+            (atlas.cell_w, atlas.cell_h, atlas.rows),
+            (FRAME_W, FRAME_H, ANIM_ROWS)
+        );
         use PetState::*;
-        for s in [Idle, RunRight, RunLeft, Wave, Jump, Failed, Waiting, Run, Review] {
+        for s in [
+            Idle, RunRight, RunLeft, Wave, Jump, Failed, Waiting, Run, Review,
+        ] {
             let (row, durs) = s.def();
             for col in 0..COLUMNS {
                 let drawn = (0..FRAME_H).any(|y| {
