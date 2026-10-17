@@ -252,12 +252,12 @@ enum ConfirmAction {
 }
 
 impl ConfirmAction {
-    /// (框样式 0 危险 / 1 导入, 标题, 确认按钮文案)
-    fn dialog(&self) -> (i32, &'static str, &'static str) {
+    /// (框样式, 标题, 确认按钮文案)
+    fn dialog(&self) -> (ConfirmKind, &'static str, &'static str) {
         match self {
-            ConfirmAction::DeleteGroup(_) => (0, "删除分组", "删除"),
-            ConfirmAction::DeletePet(_) => (0, "删除桌宠", "删除"),
-            ConfirmAction::ImportReplace(_) => (1, "导入并替换", "替换导入"),
+            ConfirmAction::DeleteGroup(_) => (ConfirmKind::Danger, "删除分组", "删除"),
+            ConfirmAction::DeletePet(_) => (ConfirmKind::Danger, "删除桌宠", "删除"),
+            ConfirmAction::ImportReplace(_) => (ConfirmKind::Replace, "导入并替换", "替换导入"),
         }
     }
 }
@@ -586,7 +586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 st.gallery = None;
             }
             THUMB_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // 在跑的缩略图线程作废
-            a.settings_win.set_pet_view(0);
+            a.settings_win.set_pet_view(PetView::Installed);
             a.settings_win
                 .set_gallery_cards(ModelRc::new(VecModel::from(Vec::<GalleryCardUi>::new())));
             a.settings_win
@@ -2082,17 +2082,17 @@ fn refresh_gallery(app: &Rc<App>) {
             .iter()
             .map(|p| {
                 let status = if st.settings.pet_id == p.slug {
-                    3
+                    GalleryStatus::Active
                 } else if st
                     .pets
                     .iter()
                     .any(|lp| lp.id == p.slug && lp.error.is_none())
                 {
-                    2
+                    GalleryStatus::Installed
                 } else if st.installing.contains(&p.slug) {
-                    1
+                    GalleryStatus::Installing
                 } else {
-                    0
+                    GalleryStatus::Installable
                 };
                 GalleryCardUi {
                     name: p.name.clone().into(),
@@ -2436,7 +2436,7 @@ fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
     } else if is(|t| &t.update) {
         // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
         open_settings(a);
-        a.settings_win.set_page(2);
+        a.settings_win.set_page(SettingsPage::General);
         if a.state.borrow().update.is_some() {
             // 已发现新版:菜单项此时文案是「升级到 vX.Y.Z」,点击即下载安装
             start_update_install(a);
