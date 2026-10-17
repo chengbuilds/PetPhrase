@@ -312,13 +312,14 @@ struct State {
     installing: HashSet<String>,
 }
 
-/// 托盘图标与菜单一起建、一起 drop(drop 即移除图标)
+/// 托盘图标与菜单一起建、一起 drop(drop 即移除图标);菜单项按名字认,不靠下标
 struct Tray {
     _icon: tray_icon::TrayIcon,
-    /// 菜单项 id,下标即 on_tray_menu 的动作序号
-    ids: [tray_icon::menu::MenuId; 4],
-    /// 「检查更新」项,发现新版后改文案
-    update_item: tray_icon::menu::MenuItem,
+    toggle: tray_icon::menu::MenuItem,
+    settings: tray_icon::menu::MenuItem,
+    /// 「检查更新」,发现新版后改文案
+    update: tray_icon::menu::MenuItem,
+    quit: tray_icon::menu::MenuItem,
 }
 
 #[derive(Default)]
@@ -2324,14 +2325,10 @@ fn setup_tray(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
     let icon = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h)?;
 
     let toggle = MenuItem::new("显示/隐藏宠物", true, None);
-    let settings_item = MenuItem::new("设置", true, None);
-    let update_item = MenuItem::new("检查更新", true, None);
+    let settings = MenuItem::new("设置", true, None);
+    let update = MenuItem::new("检查更新", true, None);
     let quit = MenuItem::new("退出", true, None);
-    let menu = Menu::new();
-    menu.append(&toggle)?;
-    menu.append(&settings_item)?;
-    menu.append(&update_item)?;
-    menu.append(&quit)?;
+    let menu = Menu::with_items(&[&toggle, &settings, &update, &quit])?;
 
     let icon = tray_icon::TrayIconBuilder::new()
         .with_icon(icon)
@@ -2341,42 +2338,63 @@ fn setup_tray(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
         .with_menu_on_left_click(false)
         .build()?;
 
-    let ids = [
-        toggle.id().clone(),
-        settings_item.id().clone(),
-        update_item.id().clone(),
-        quit.id().clone(),
-    ];
     app.state.borrow_mut().tray = Some(Tray {
         _icon: icon,
-        ids,
-        update_item,
+        toggle,
+        settings,
+        update,
+        quit,
     });
     sync_update_menu(app); // 托盘重建时恢复「升级到 vX」文案
     Ok(())
 }
 
 /// 托盘事件处理器全程只注册一次:tray-icon/muda 的 set_event_handler 存在全局 OnceCell 里,
-/// 再次注册被静默丢弃(托盘重建后菜单全失灵即此)。处理器只转发 id,动作按当前 Tray 的 ids 现查。
+/// 再次注册被静默丢弃(托盘重建后菜单全失灵即此)。处理器只转发 id,动作按当前 Tray 的菜单项现认。
 /// 回调在 Win32 消息过程里同步触发,统一 invoke_from_event_loop 延后执行,避开与正在进行的 RefCell 借用重入
 fn wire_tray_events() {
+    static AFTER_DOUBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     tray_icon::TrayIconEvent::set_event_handler(Some(|ev: tray_icon::TrayIconEvent| {
         if !matches!(ev, tray_icon::TrayIconEvent::Move { .. }) {
             dbg_log(&format!("tray event {ev:?}"));
         }
         // 托盘图标左键单击 = 显示/隐藏宠物(同菜单首项;菜单只挂在右键)
-        if let tray_icon::TrayIconEvent::Click {
-            button: tray_icon::MouseButton::Left,
-            button_state: tray_icon::MouseButtonState::Up,
-            ..
-        } = ev
-        {
+        if tray_toggle_wanted(&ev, &AFTER_DOUBLE) {
             let _ = slint::invoke_from_event_loop(|| with_app(toggle_pet));
         }
     }));
     tray_icon::menu::MenuEvent::set_event_handler(Some(|ev: tray_icon::menu::MenuEvent| {
         let _ = slint::invoke_from_event_loop(move || with_app(|a| on_tray_menu(a, &ev.id)));
     }));
+}
+
+/// 这次托盘事件该不该切换宠物显隐。Windows 把左键双击报成「Down、Up、DoubleClick、Up」:
+/// 第二个 Up 属于同一次双击,要跳过,否则双击 = 隐藏再显示、宠物闪一下。
+/// 新的 Down 清掉标记,防止丢了第二个 Up 时吞掉下一次单击
+fn tray_toggle_wanted(
+    ev: &tray_icon::TrayIconEvent,
+    after_double: &std::sync::atomic::AtomicBool,
+) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    use tray_icon::{MouseButton::Left, MouseButtonState, TrayIconEvent};
+    match ev {
+        TrayIconEvent::DoubleClick { button: Left, .. } => {
+            after_double.store(true, Relaxed);
+            false
+        }
+        TrayIconEvent::Click {
+            button: Left,
+            button_state,
+            ..
+        } => match button_state {
+            MouseButtonState::Down => {
+                after_double.store(false, Relaxed);
+                false
+            }
+            MouseButtonState::Up => !after_double.swap(false, Relaxed),
+        },
+        _ => false,
+    }
 }
 
 /// 显示/隐藏宠物(托盘左键与菜单首项共用)
@@ -2389,30 +2407,27 @@ fn toggle_pet(a: &Rc<App>) {
     }
 }
 
-/// 托盘菜单动作:按当前托盘的 ids 现查序号
+/// 托盘菜单动作:按当前托盘的菜单项现认(托盘随图标位置切换重建,id 会变)
 fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
-    let which = a
-        .state
-        .borrow()
-        .tray
-        .as_ref()
-        .and_then(|t| t.ids.iter().position(|x| x == id));
-    match which {
-        Some(0) => toggle_pet(a),
-        Some(1) => open_settings(a),
-        Some(2) => {
-            // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
-            open_settings(a);
-            a.settings_win.set_page(2);
-            if a.state.borrow().update.is_some() {
-                // 已发现新版:菜单项此时文案是「升级到 vX.Y.Z」,点击即下载安装
-                start_update_install(a);
-            } else {
-                start_update_check(a, true);
-            }
+    let is = |item: fn(&Tray) -> &tray_icon::menu::MenuItem| {
+        (a.state.borrow().tray.as_ref()).is_some_and(|t| item(t).id() == id)
+    };
+    if is(|t| &t.toggle) {
+        toggle_pet(a);
+    } else if is(|t| &t.settings) {
+        open_settings(a);
+    } else if is(|t| &t.update) {
+        // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
+        open_settings(a);
+        a.settings_win.set_page(2);
+        if a.state.borrow().update.is_some() {
+            // 已发现新版:菜单项此时文案是「升级到 vX.Y.Z」,点击即下载安装
+            start_update_install(a);
+        } else {
+            start_update_check(a, true);
         }
-        Some(_) => quit_app(a),
-        None => {}
+    } else if is(|t| &t.quit) {
+        quit_app(a);
     }
 }
 
@@ -2420,7 +2435,7 @@ fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
 fn sync_update_menu(app: &Rc<App>) {
     let st = app.state.borrow();
     if let (Some(t), Some(u)) = (&st.tray, &st.update) {
-        t.update_item.set_text(format!("升级到 v{}", u.version));
+        t.update.set_text(format!("升级到 v{}", u.version));
     }
 }
 
@@ -2459,6 +2474,34 @@ fn quit_app(a: &Rc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_double_click_toggles_once() {
+        use tray_icon::{MouseButton, MouseButtonState::*, TrayIconEvent};
+        let click = |button, button_state| TrayIconEvent::Click {
+            id: Default::default(),
+            position: Default::default(),
+            rect: Default::default(),
+            button,
+            button_state,
+        };
+        let double = TrayIconEvent::DoubleClick {
+            id: Default::default(),
+            position: Default::default(),
+            rect: Default::default(),
+            button: MouseButton::Left,
+        };
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let toggles =
+            |evs: &[&TrayIconEvent]| evs.iter().filter(|e| tray_toggle_wanted(e, &flag)).count();
+        let (down, up) = (click(MouseButton::Left, Down), click(MouseButton::Left, Up));
+        assert_eq!(toggles(&[&down, &up]), 1, "单击切一次");
+        assert_eq!(toggles(&[&down, &up, &double, &up]), 1, "双击也只切一次");
+        // 双击后第二个 Up 丢了:下一次单击照常生效
+        assert_eq!(toggles(&[&down, &up, &double]), 1);
+        assert_eq!(toggles(&[&down, &up]), 1);
+        assert_eq!(toggles(&[&click(MouseButton::Right, Up)]), 0, "右键归菜单");
+    }
 
     #[test]
     fn plain_name_rejects_anything_that_escapes_the_pet_root() {
