@@ -89,8 +89,12 @@ fn thumb_from_sheet(img: &image::DynamicImage) -> slint::SharedPixelBuffer<slint
     let atlas = crate::anim::Atlas::from_size(img.width(), img.height());
     let w = atlas.cell_w.min(img.width());
     let h = atlas.cell_h.min(img.height());
-    let frame = img.crop_imm(0, 0, w, h).into_rgba8();
-    slint::SharedPixelBuffer::clone_from_slice(frame.as_raw(), frame.width(), frame.height())
+    rgba_buffer(&img.crop_imm(0, 0, w, h).into_rgba8())
+}
+
+/// image 的 RGBA 图 → Slint 像素缓冲(宠物卡与宠物库缩略图共用)
+pub fn rgba_buffer(img: &image::RgbaImage) -> slint::SharedPixelBuffer<slint::Rgba8Pixel> {
+    slint::SharedPixelBuffer::clone_from_slice(img.as_raw(), img.width(), img.height())
 }
 
 /// 依序扫描多个根目录,每个根目录下的一级子目录 = 一个宠物包。

@@ -169,12 +169,9 @@ pub fn load_thumb(path: &Path) -> Option<slint::Image> {
     if frame.width() == 0 {
         return None;
     }
-    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-        frame.as_raw(),
-        frame.width(),
-        frame.height(),
-    );
-    Some(slint::Image::from_rgba8(buf))
+    Some(slint::Image::from_rgba8(crate::pet_loader::rgba_buffer(
+        &frame,
+    )))
 }
 
 /// 下载校验后装进各目标目录:要么每个目录都装好,要么全部保持原样。
