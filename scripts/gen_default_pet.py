@@ -1,81 +1,51 @@
-"""生成内置默认宠 Mochi 的 petdex 格式雪碧图。
+"""导出内置默认宠「晨光」到 app-slint/pets/default/(spritesheet.webp + pet.json)。
 
-1536x1872 = 8列 x 9行,每帧 192x208(与 petdex 实测素材同规格)。
-行序: idle, wave, run, failed, review, jump, extra1, extra2, extra3(后7行复用 idle)。
-每状态 6 帧(第 7-8 列留空)。运行一次,产物提交进仓库。
+绘制源是同目录的 gen_default_pet.html(Canvas 逐帧绘制,双击可预览);
+这里用无头 Edge 打开它,读出页面写进 #out 的 WebP data URL 落盘。只依赖 Python 标准库 + 系统自带 Edge。
+运行一次,产物提交进仓库。
 """
 
-import math
+import base64
+import json
+import re
+import subprocess
+import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+SHEET_W, SHEET_H = 192 * 8, 208 * 9
 
-FRAME_W, FRAME_H = 192, 208
-COLS, ROWS = 8, 9
-FRAMES = 6
-
-BODY = (249, 115, 22, 255)        # 橘
-BODY_DARK = (234, 88, 12, 255)
-HIGHLIGHT = (255, 200, 150, 255)
-EYE = (30, 41, 59, 255)
-BLUSH = (251, 146, 60, 160)
-CHEEK = (255, 255, 255, 230)
-
-
-def draw_blob(draw: ImageDraw.ImageDraw, cx: float, base_y: float, squash: float, lean: float) -> None:
-    """圆润史莱姆:squash 呼吸压扁系数,lean 左右倾斜像素。"""
-    w = 130 * (1 + (1 - squash) * 0.5)
-    h = 110 * squash
-    left = cx - w / 2 + lean
-    top = base_y - h
-    # 身体 + 底部阴影
-    draw.ellipse([cx - 62, base_y - 14, cx + 62, base_y + 8], fill=(30, 41, 59, 36))
-    draw.ellipse([left, top, left + w, base_y + 4], fill=BODY, outline=BODY_DARK, width=4)
-    # 高光
-    draw.ellipse([left + w * 0.16, top + h * 0.12, left + w * 0.42, top + h * 0.38], fill=HIGHLIGHT)
-    # 眼睛
-    ey = top + h * 0.45
-    for dx in (-24, 24):
-        draw.ellipse([cx + dx - 8 + lean, ey - 10, cx + dx + 8 + lean, ey + 10], fill=EYE)
-        draw.ellipse([cx + dx - 3 + lean, ey - 7, cx + dx + 3 + lean, ey - 1], fill=CHEEK)
-    # 腮红 + 嘴
-    for dx in (-44, 44):
-        draw.ellipse([cx + dx - 9 + lean, ey + 8, cx + dx + 9 + lean, ey + 20], fill=BLUSH)
-    draw.arc([cx - 12 + lean, ey + 4, cx + 12 + lean, ey + 24], 20, 160, fill=EYE, width=4)
-
-
-def draw_arm(draw: ImageDraw.ImageDraw, cx: float, base_y: float, angle_deg: float) -> None:
-    """wave 招手小圆手。"""
-    ax = cx + 66 + 10 * math.cos(math.radians(angle_deg))
-    ay = base_y - 70 - 26 * math.sin(math.radians(angle_deg))
-    draw.ellipse([ax - 14, ay - 14, ax + 14, ay + 14], fill=BODY, outline=BODY_DARK, width=3)
+PET_JSON = {
+    "id": "default",
+    "displayName": "晨光",
+    "description": "白色玻璃泡 + 七彩流光边(PetPhrase 内置)",
+    "spritesheetPath": "spritesheet.webp",
+}
 
 
 def main() -> None:
-    sheet = Image.new("RGBA", (FRAME_W * COLS, FRAME_H * ROWS), (0, 0, 0, 0))
-    cx, base_y = FRAME_W / 2, FRAME_H - 30.0
-
-    for row in range(ROWS):
-        for col in range(FRAMES):
-            frame = Image.new("RGBA", (FRAME_W, FRAME_H), (0, 0, 0, 0))
-            d = ImageDraw.Draw(frame)
-            t = col / FRAMES * 2 * math.pi
-            if row == 1:  # wave:身体微倾 + 招手
-                draw_blob(d, cx, base_y, 1.0 + 0.03 * math.sin(t), lean=6 * math.sin(t))
-                draw_arm(d, cx, base_y, 30 + 50 * (0.5 + 0.5 * math.sin(t)))
-            else:  # idle 及其余行:呼吸起伏
-                draw_blob(d, cx, base_y, 1.0 + 0.06 * math.sin(t), lean=0)
-            sheet.paste(frame, (col * FRAME_W, row * FRAME_H))
-
-    out = Path(__file__).resolve().parent.parent / "app-slint" / "pets" / "default"
+    here = Path(__file__).resolve().parent
+    out = here.parent / "app-slint" / "pets" / "default"
+    with tempfile.TemporaryDirectory() as profile:  # 独立配置目录:不挂到用户正开着的 Edge 上
+        dom = subprocess.run(
+            [str(EDGE), "--headless=new", "--disable-gpu", f"--user-data-dir={profile}",
+             "--virtual-time-budget=5000", "--dump-dom", (here / "gen_default_pet.html").as_uri()],
+            capture_output=True, text=True, encoding="utf-8", check=True,
+        ).stdout
+    m = re.search(r'<pre id="out">data:image/webp;base64,([A-Za-z0-9+/=]+)</pre>', dom)
+    if not m:
+        raise SystemExit("页面没产出 WebP(#out 为空),检查 gen_default_pet.html 是否报错")
+    webp = base64.b64decode(m.group(1))
+    if webp[12:16] != b"VP8X":  # 带透明通道的有损 WebP 必是扩展格式
+        raise SystemExit(f"WebP 格式意外: {webp[12:16]!r}")
+    w = int.from_bytes(webp[24:27], "little") + 1
+    h = int.from_bytes(webp[27:30], "little") + 1
+    if (w, h) != (SHEET_W, SHEET_H):
+        raise SystemExit(f"雪碧图尺寸 {w}x{h},应为 {SHEET_W}x{SHEET_H}")
     out.mkdir(parents=True, exist_ok=True)
-    sheet.save(out / "spritesheet.png")
-    (out / "pet.json").write_text(
-        '{\n  "name": "Mochi",\n  "slug": "default",\n  "kind": "slime",\n'
-        '  "frame": { "width": 192, "height": 208 }\n}\n',
-        encoding="utf-8",
-    )
-    print(f"OK -> {out}")
+    (out / "spritesheet.webp").write_bytes(webp)
+    (out / "pet.json").write_text(json.dumps(PET_JSON, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"OK -> {out} ({len(webp) // 1024} KB)")
 
 
 if __name__ == "__main__":

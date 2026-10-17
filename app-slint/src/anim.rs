@@ -217,6 +217,29 @@ mod tests {
     }
 
     #[test]
+    fn bundled_default_pet_matches_state_table() {
+        // 内置宠逐格对齐状态表:有帧的格非空、多余格全透明
+        // (旧 Mochi 挥手画在右跑行、failed 播到空格闪没,就是缺这道校验)
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/pets"));
+        let pets = crate::pet_loader::scan_pets(&[root]);
+        let pet = pets.iter().find(|p| p.id == "default").expect("内置默认宠");
+        assert_eq!(pet.error, None);
+        let img = image::open(&pet.spritesheet).unwrap().into_rgba8();
+        let atlas = Atlas::from_size(img.width(), img.height());
+        assert_eq!((atlas.cell_w, atlas.cell_h, atlas.rows), (FRAME_W, FRAME_H, ANIM_ROWS));
+        use PetState::*;
+        for s in [Idle, RunRight, RunLeft, Wave, Jump, Failed, Waiting, Run, Review] {
+            let (row, durs) = s.def();
+            for col in 0..COLUMNS {
+                let drawn = (0..FRAME_H).any(|y| {
+                    (0..FRAME_W).any(|x| img.get_pixel(col * FRAME_W + x, row * FRAME_H + y)[3] > 8)
+                });
+                assert_eq!(drawn, (col as usize) < durs.len(), "{s:?} 第 {col} 格");
+            }
+        }
+    }
+
+    #[test]
     fn atlas_detects_v1_v2_and_scaled() {
         assert_eq!(
             Atlas::from_size(1536, 1872),

@@ -1,6 +1,6 @@
 {
-  "name": "Mochi",
-  "slug": "default",
-  "kind": "slime",
-  "frame": { "width": 192, "height": 208 }
+  "id": "default",
+  "displayName": "晨光",
+  "description": "白色玻璃泡 + 七彩流光边(PetPhrase 内置)",
+  "spritesheetPath": "spritesheet.webp"
 }
