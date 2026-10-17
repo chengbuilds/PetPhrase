@@ -180,12 +180,11 @@ pub struct Rect {
 pub struct Placement {
     pub x: f32,
     pub y: f32,
-    pub right_side: bool,
 }
 
 const SCREEN_GAP: f32 = 12.0;
 
-/// 面板贴宠定位:优先上方,越界翻转/钳制;预览侧按右侧余量定
+/// 面板贴宠定位:优先上方,越界翻转/钳制
 pub fn panel_position(pet: Rect, panel_w: f32, panel_h: f32, work: Rect) -> Placement {
     let mut x = pet.x;
     if x + panel_w > work.x + work.w {
@@ -199,12 +198,7 @@ pub fn panel_position(pet: Rect, panel_w: f32, panel_h: f32, work: Rect) -> Plac
     }
     y = y.clamp(work.y, (work.y + work.h - panel_h).max(work.y));
 
-    let right_room = work.x + work.w - (x + panel_w);
-    Placement {
-        x,
-        y,
-        right_side: right_room >= 260.0,
-    }
+    Placement { x, y }
 }
 
 #[cfg(test)]
@@ -314,7 +308,6 @@ mod tests {
             work,
         );
         assert_eq!((p.x, p.y), (800.0, 600.0 - 400.0 - 12.0));
-        assert!(p.right_side);
         // 贴顶翻下方
         let p2 = panel_position(
             Rect {
@@ -328,7 +321,7 @@ mod tests {
             work,
         );
         assert_eq!(p2.y, 10.0 + 208.0 + 12.0);
-        // 贴右缘:钳制且预览贴左
+        // 贴右缘:钳制
         let p3 = panel_position(
             Rect {
                 x: 1700.0,
@@ -341,6 +334,5 @@ mod tests {
             work,
         );
         assert!(p3.x + 300.0 <= 1920.0);
-        assert!(!p3.right_side);
     }
 }
