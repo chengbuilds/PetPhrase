@@ -329,7 +329,7 @@ struct GalleryState {
     filtered: Vec<usize>,
     page: usize,
     thumbs: HashMap<String, slint::Image>,
-    /// 已尝试过拉缩略图的 slug(失败的不反复重试)
+    /// 已尝试过拉缩略图的 slug(个别缺图的不反复重试;整批失败会撤回,见 refresh_gallery)
     thumb_tried: HashSet<String>,
     /// 关窗/重开后,旧的后台结果据此丢弃
     token: u64,
@@ -1998,13 +1998,6 @@ fn delete_pet(app: &Rc<App>, id: &str) {
 
 /* ================= 在线宠物库 ================= */
 
-fn thumb_cache_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| data_dir());
-    base.join("PetPhrase").join("thumbs")
-}
-
 /// 切到「发现更多」:首次进入后台拉 manifest;已加载则直接刷新
 fn open_gallery(app: &Rc<App>) {
     let token = {
@@ -2132,21 +2125,45 @@ fn refresh_gallery(app: &Rc<App>) {
         return;
     };
     std::thread::spawn(move || {
-        let files = gallery::fetch_thumbs(&need, &thumb_cache_dir());
+        let result = gallery::thumb_cache_dir(std::env::var_os("LOCALAPPDATA"))
+            .and_then(|dir| gallery::fetch_thumbs(&need, &dir));
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|a| {
-                {
+                let failed = {
                     let mut st = a.state.borrow_mut();
                     let Some(g) = st.gallery.as_mut().filter(|g| g.token == token) else {
                         return;
                     };
-                    for (slug, path) in files {
-                        if let Some(img) = gallery::load_thumb(&path) {
-                            g.thumbs.insert(slug, img);
+                    match result {
+                        Ok(files) => {
+                            for (slug, path) in files {
+                                match gallery::load_thumb(&path) {
+                                    Some(img) => {
+                                        g.thumbs.insert(slug, img);
+                                    }
+                                    // 解不开的缓存(如中途断网的半截文件)删掉,下次重拉;删不掉只是继续空着
+                                    None => {
+                                        let _ = std::fs::remove_file(&path);
+                                    }
+                                }
+                            }
+                            None
+                        }
+                        Err(e) => {
+                            // 整批没拉到:撤掉「已尝试」,翻页/重进时重试。这里不自动重刷,断网时会变成连环重试
+                            for p in &need {
+                                g.thumb_tried.remove(&p.slug);
+                            }
+                            Some(e)
                         }
                     }
+                };
+                match failed {
+                    None => refresh_gallery(a),
+                    Some(e) => a
+                        .settings_win
+                        .set_gallery_status(format!("⚠ {e},翻页或稍后重试").into()),
                 }
-                refresh_gallery(a);
             });
         });
     });

@@ -83,6 +83,9 @@ Section "Uninstall"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}"
   DeleteRegKey HKCU "${UNINST_KEY}"
 
+  ; 宠物库缩略图缓存(纯缓存、无用户数据,一律删)
+  RMDir /r "$LOCALAPPDATA\PetPhrase"
+
   ; 用户数据按需删除;静默卸载一律保留
   IfSilent skip_data
   MessageBox MB_YESNO|MB_DEFBUTTON2 "是否同时删除常用语数据?$\n(%APPDATA%\PetPhrase)" IDNO skip_data

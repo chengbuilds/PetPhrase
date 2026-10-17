@@ -100,10 +100,19 @@ pub fn search(pets: &[RemotePet], query: &str) -> Vec<usize> {
         .collect()
 }
 
+/// 缩略图磁盘缓存 `%LOCALAPPDATA%\PetPhrase\thumbs`(缓存不进漫游的 APPDATA;卸载时整个删掉)。
+/// 参数传 `env::var_os("LOCALAPPDATA")`;缺这个变量就没有缓存位置,报错而不是随便找个地方放
+pub fn thumb_cache_dir(local_appdata: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    local_appdata
+        .map(|base| PathBuf::from(base).join("PetPhrase").join("thumbs"))
+        .ok_or_else(|| "找不到缩略图缓存位置(LOCALAPPDATA 环境变量缺失)".into())
+}
+
 /// 一页缩略图,一个 curl 进程 --parallel 拉完,落到磁盘缓存(已缓存的跳过)。
-/// 单张失败不影响其它;返回 (slug, 本地路径) 仅含存在的文件
-pub fn fetch_thumbs(pets: &[RemotePet], cache: &Path) -> Vec<(String, PathBuf)> {
-    let _ = std::fs::create_dir_all(cache);
+/// 个别失败(如上游缺这张图)不影响其它,返回 (slug, 本地路径) 仅含存在的文件;
+/// 要拉的一张都没拉到且 curl 报错 = 网络不通,返回 Err
+pub fn fetch_thumbs(pets: &[RemotePet], cache: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    std::fs::create_dir_all(cache).map_err(|e| format!("缩略图缓存目录无法创建:{e}"))?;
     let path_of = |p: &RemotePet| cache.join(format!("{}.webp", p.slug));
     let missing: Vec<(PathBuf, String)> = pets
         .iter()
@@ -123,12 +132,18 @@ pub fn fetch_thumbs(pets: &[RemotePet], cache: &Path) -> Vec<(String, PathBuf)> 
             .collect();
         let mut args: Vec<&str> = vec!["--parallel", "--max-time", "20"];
         args.extend(owned.iter().map(String::as_str));
-        let _ = run_curl(&args); // 部分失败时退出码非零,已下载的照用
+        // 部分失败时退出码也非零,已下载的照用
+        if let Err(e) = run_curl(&args) {
+            if missing.iter().all(|(path, _)| !path.is_file()) {
+                return Err(format!("缩略图加载失败({e})"));
+            }
+        }
     }
-    pets.iter()
+    Ok(pets
+        .iter()
         .map(|p| (p.slug.clone(), path_of(p)))
         .filter(|(_, path)| path.is_file())
-        .collect()
+        .collect())
 }
 
 /// 载入缩略图并裁掉左右整列不透明纯黑的补边:上游把 192:208 的格子塞进 80×80 方图时
@@ -382,6 +397,15 @@ mod tests {
         assert!(!a.path().join("p").exists(), "已换入的根被撤回");
         assert!(!a.path().join(".p.part").exists() && !b.path().join(".p.part").exists());
         assert!(b.path().join("p/busy").is_file(), "旧包原样保留");
+    }
+
+    #[test]
+    fn thumb_cache_dir_needs_localappdata() {
+        assert_eq!(
+            thumb_cache_dir(Some(r"C:\Users\u\AppData\Local".into())).unwrap(),
+            Path::new(r"C:\Users\u\AppData\Local\PetPhrase\thumbs")
+        );
+        assert!(thumb_cache_dir(None).is_err(), "缺变量报错,不回落到别处");
     }
 
     #[test]
