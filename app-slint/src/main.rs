@@ -1,5 +1,5 @@
 //! PetPhrase Slint 原生版 —— 单进程装配:
-//! 宠物/面板/预览/设置四窗口、托盘、剪贴板、自启、单实例。
+//! 宠物/面板/设置三窗口、托盘、剪贴板、自启、单实例。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -119,8 +119,11 @@ fn pet_roots(custom: &Option<String>) -> Vec<PathBuf> {
             roots.push(dir.join("pets"));
         }
     }
+    // petdex CLI 同时装到这两处;同名包按 id 去重,先到先得
     if let Ok(home) = std::env::var("USERPROFILE") {
-        roots.push(PathBuf::from(home).join(".codex").join("pets"));
+        let home = PathBuf::from(home);
+        roots.push(home.join(".petdex").join("pets"));
+        roots.push(home.join(".codex").join("pets"));
     }
     if let Some(c) = custom {
         roots.push(PathBuf::from(c));
@@ -161,9 +164,10 @@ struct State {
     confirm_action: Option<ConfirmAction>,
     /// 单槽删除撤销:(分组下标, 原短语下标, 短语)
     last_deleted: Option<(usize, usize, storage::Phrase)>,
-    /// 闲时动画:idle 帧计数与下次彩蛋触发阈值
-    idle_ticks: i32,
-    next_special: i32,
+    /// 闲时动画:已闲置时长与下次彩蛋触发阈值(ms)
+    idle_ms: u32,
+    next_special: u32,
+    last_frame_ms: u32,
 }
 
 struct App {
@@ -175,6 +179,8 @@ struct App {
     move_timer: slint::Timer,
     update_timer: slint::Timer,
     undo_timer: slint::Timer,
+    /// 帧定时器:每帧时长不同,单发链式续约
+    frame_timer: slint::Timer,
 }
 
 // 后台线程结果经 invoke_from_event_loop 回主线程时取 App:
@@ -262,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pets,
             active_group,
             items: Vec::new(),
-            animator: Animator::new(1, 1),
+            animator: Animator::new(1),
             clipboard: arboard::Clipboard::new().ok(),
             thumb_cache: HashMap::new(),
             panel_native_ready: false,
@@ -274,13 +280,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             update_menu: None,
             confirm_action: None,
             last_deleted: None,
-            idle_ticks: 0,
-            next_special: rand_ticks(),
+            idle_ms: 0,
+            next_special: rand_idle_ms(),
+            last_frame_ms: 0,
         }),
         hide_timer: slint::Timer::default(),
         move_timer: slint::Timer::default(),
         update_timer: slint::Timer::default(),
         undo_timer: slint::Timer::default(),
+        frame_timer: slint::Timer::default(),
     });
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -291,7 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wire_pet(&app);
     wire_panel(&app);
     wire_settings(&app);
-    setup_frame_timer(&app);
+    schedule_frame(&app, 0);
     let _tray = setup_tray(&app)?;
 
     // 启动 10s 后静默检查一次更新;此后每 24h 重查一次
@@ -369,13 +377,13 @@ fn set_theme(app: &Rc<App>, solid: bool) {
 
 /* ================= 宠物窗 ================= */
 
-/// 闲时彩蛋间隔:90~330 帧(FRAME_MS≈183ms → 约 16~60 秒),纳秒时钟当随机源免拉依赖
-fn rand_ticks() -> i32 {
+/// 闲时彩蛋间隔 16~60 秒,纳秒时钟当随机源免拉依赖
+fn rand_idle_ms() -> u32 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    90 + (nanos % 241) as i32
+    16_000 + nanos % 44_001
 }
 
 /// 宠窗中心不在任何显示器内 → 挪回主显示器右下角(留出任务栏与边距)
@@ -398,7 +406,10 @@ fn clamp_pet_to_screen(app: &Rc<App>) {
             if visible {
                 return;
             }
-            if let Some(m) = w.primary_monitor().or_else(|| w.available_monitors().next()) {
+            if let Some(m) = w
+                .primary_monitor()
+                .or_else(|| w.available_monitors().next())
+            {
                 let mp = m.position();
                 let ms = m.size();
                 let nx = (mp.x + ms.width as i32 - size.width as i32 - 80).max(mp.x);
@@ -472,12 +483,11 @@ fn wire_pet(app: &Rc<App>) {
     });
 }
 
-/// 解码雪碧图并推算网格;失败(文件损坏/非图片)返回 None
-fn try_load_sheet(path: &str) -> Option<(slint::Image, i32, i32)> {
+/// 解码雪碧图并识别图集几何;失败(文件损坏/非图片)返回 None
+fn try_load_sheet(path: &str) -> Option<(slint::Image, anim::Atlas)> {
     let img = slint::Image::load_from_path(std::path::Path::new(path)).ok()?;
     let size = img.size();
-    let (rows, cols) = anim::grid_from_image(size.width, size.height);
-    Some((img, rows, cols))
+    Some((img, anim::Atlas::from_size(size.width, size.height)))
 }
 
 /// 选中宠优先,解码失败依次回退其它可用宠;全部失败显示缺失占位
@@ -496,8 +506,10 @@ fn refresh_pet_sprite(app: &Rc<App>) {
             .collect() // 选中宠在首位,可能重复一次,解码成功即返回无所谓
     };
     for path in &candidates {
-        if let Some((img, rows, cols)) = try_load_sheet(path) {
-            app.state.borrow_mut().animator = Animator::new(rows, cols);
+        if let Some((img, atlas)) = try_load_sheet(path) {
+            app.state.borrow_mut().animator = Animator::new(atlas.anim_rows());
+            app.pet.set_cell_w(atlas.cell_w as i32);
+            app.pet.set_cell_h(atlas.cell_h as i32);
             app.pet.set_sheet(img);
             app.pet.set_missing(false);
             return;
@@ -521,39 +533,42 @@ fn apply_pet_scale(app: &Rc<App>, old_scale: f32, new_scale: f32) {
     win.set_position(slint::PhysicalPosition::new(nx, ny));
 }
 
-fn setup_frame_timer(app: &Rc<App>) {
+/// 播一帧并按该帧时长预约下一帧(上游每帧时长不等,固定周期定时器表达不了)
+fn schedule_frame(app: &Rc<App>, delay_ms: u32) {
     let a = app.clone();
-    let timer = Box::leak(Box::new(slint::Timer::default()));
-    timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(anim::FRAME_MS),
+    app.frame_timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(delay_ms as u64),
         move || {
-            // 宠隐藏时不空转(托盘隐藏后帧步进/属性刷新纯浪费)
+            // 宠隐藏时不步进,低频轮询等它重新显示
             if !a.pet.window().is_visible() {
+                schedule_frame(&a, 1000);
                 return;
             }
-            let (row, col) = {
+            let (row, col, dur) = {
                 let mut st = a.state.borrow_mut();
-                // 闲够一段随机时长播一个彩蛋动画(jump/run/review/failed),
-                // 雪碧图 6 行素材以前只用了 idle/wave 两行
-                if st.animator.is_idle() {
-                    st.idle_ticks += 1;
-                    if st.idle_ticks >= st.next_special {
-                        st.idle_ticks = 0;
-                        st.next_special = rand_ticks();
+                // 闲够一段随机时长播一个彩蛋动画
+                if st.animator.state() == PetState::Idle {
+                    st.idle_ms += st.last_frame_ms;
+                    if st.idle_ms >= st.next_special {
+                        st.idle_ms = 0;
+                        st.next_special = rand_idle_ms();
                         let rows = st.animator.rows();
-                        let rand = st.next_special as u32; // 已是随机值,直接复用作挑选源
+                        let rand = st.next_special; // 已是随机值,直接复用作挑选源
                         if let Some(s) = anim::pick_special(rows, rand) {
                             st.animator.play(s, true);
                         }
                     }
                 } else {
-                    st.idle_ticks = 0;
+                    st.idle_ms = 0;
                 }
-                st.animator.step()
+                let f = st.animator.step();
+                st.last_frame_ms = f.2;
+                f
             };
-            a.pet.set_frame_row(row);
-            a.pet.set_frame_col(col);
+            a.pet.set_frame_row(row as i32);
+            a.pet.set_frame_col(col as i32);
+            schedule_frame(&a, dur);
         },
     );
 }
@@ -862,6 +877,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
             );
         }
     } else {
+        app.state.borrow_mut().animator.play(PetState::Failed, true);
         app.panel.set_failed_idx(i);
         app.panel
             .set_save_error("⚠ 复制失败,请重试(剪贴板被其它程序占用)".into());

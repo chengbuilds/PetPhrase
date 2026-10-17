@@ -311,7 +311,9 @@ mod tests {
     fn save_then_load_roundtrip() {
         let dir = tempdir().unwrap();
         let mut data = PhraseData::default();
-        data.groups[0].phrases.push(Phrase::new("x".into(), "测试".into()));
+        data.groups[0]
+            .phrases
+            .push(Phrase::new("x".into(), "测试".into()));
         save_phrases(dir.path(), &data).unwrap();
         assert_eq!(load_phrases(dir.path()), data);
     }
