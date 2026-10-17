@@ -1949,9 +1949,15 @@ fn is_removable(p: &PetInfo) -> bool {
         .is_some_and(|parent| petdex_install_roots().iter().any(|r| r == parent))
 }
 
-/// 两个标准目录里同名包一并删(CLI/宠物库都是双写);删的是当前宠则切到第一只可用宠
+/// id 只能是单个普通路径段:它要拼进 remove_dir_all 的路径,`.`/`..`/`C:`/带分隔符都会指到包目录之外
+fn is_plain_name(id: &str) -> bool {
+    let mut parts = std::path::Path::new(id).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+}
+
+/// 两个标准目录里同名包一并删(CLI/宠物库都是双写);删的是当前宠则换到第一只能加载的宠
 fn delete_pet(app: &Rc<App>, id: &str) {
-    if id.is_empty() || id.contains(['/', '\\']) || id == ".." {
+    if !is_plain_name(id) {
         return;
     }
     let mut err = None;
@@ -1965,24 +1971,26 @@ fn delete_pet(app: &Rc<App>, id: &str) {
     }
     refresh_pets(app);
     let was_current = app.state.borrow().settings.pet_id == id;
-    if was_current {
-        let next = app
-            .state
-            .borrow()
-            .pets
-            .iter()
-            .find(|p| p.error.is_none())
-            .map(|p| p.id.clone());
-        if let Some(next) = next {
-            let _ = select_pet(app, &next);
-        } else {
-            refresh_pet_sprite(app); // 一只不剩:显示缺失占位
+    // 按列表顺序逐只试,第一只解码成功的接任(select_pet 顺带刷卡片与宠物库)
+    let switched = was_current && {
+        let ids: Vec<String> = (app.state.borrow().pets.iter())
+            .filter(|p| p.error.is_none())
+            .map(|p| p.id.clone())
+            .collect();
+        ids.iter().any(|next| select_pet(app, next).is_ok())
+    };
+    if !switched {
+        if was_current {
+            refresh_pet_sprite(app); // 一只都换不上:显示缺失占位
         }
+        refresh_pet_cards(app);
+        refresh_gallery(app);
     }
-    refresh_pet_cards(app);
-    refresh_gallery(app);
     match err {
         Some(e) => set_data_msg(app, &format!("⚠ 删除失败:{e}"), true),
+        None if was_current && !switched => {
+            set_data_msg(app, "⚠ 已删除,但没有能加载的桌宠了", true)
+        }
         None => set_data_msg(app, "已删除 ✓", false),
     }
 }
@@ -2446,4 +2454,17 @@ fn save_pet_pos(a: &Rc<App>) {
 fn quit_app(a: &Rc<App>) {
     save_pet_pos(a);
     let _ = slint::quit_event_loop();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_name_rejects_anything_that_escapes_the_pet_root() {
+        assert!(is_plain_name("kun-like"));
+        for bad in ["", ".", "..", "a/b", r"a\b", "C:", r"C:\x", "/x", "../x"] {
+            assert!(!is_plain_name(bad), "{bad:?}");
+        }
+    }
 }
