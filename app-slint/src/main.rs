@@ -171,12 +171,15 @@ fn delete_phrase(app: &Rc<App>, gi: usize, pi: usize) {
     }
 }
 
-fn delete_group(app: &Rc<App>, gi: usize) {
+/// 按 id 删分组:确认框开着时当前分组可能已被面板切走,下标不能当目标
+fn delete_group(app: &Rc<App>, id: &str) {
     let removed = {
         let mut st = app.state.borrow_mut();
-        (gi < st.data.groups.len()).then(|| st.data.groups.remove(gi))
+        st.data
+            .group_pos(id)
+            .map(|gi| (gi, st.data.groups.remove(gi)))
     };
-    let Some(g) = removed else {
+    let Some((gi, g)) = removed else {
         return;
     };
     offer_undo(app, Deleted::Group(gi, g));
@@ -237,13 +240,37 @@ enum Deleted {
 /// 撤销窗口:足够点到横幅,又不至于挡着后续操作
 const UNDO_SECS: u64 = 3;
 
-/// 设置窗确认框待执行动作(泛化:同一个框服务多种危险操作)
+/// 设置窗确认框待执行动作(泛化:同一个框服务多种危险操作)。
+/// 目标一律随动作存下:确认框开着时界面状态(如当前分组)可能已变
 enum ConfirmAction {
-    DeleteGroup,
+    /// 删除分组(分组 id)
+    DeleteGroup(String),
     /// 删除已安装桌宠(宠物 id = 包目录名)
     DeletePet(String),
     /// 已读入并校验通过的导入数据,确认后快照+覆盖
     ImportReplace(storage::PhraseData),
+}
+
+impl ConfirmAction {
+    /// (框样式 0 危险 / 1 导入, 标题, 确认按钮文案)
+    fn dialog(&self) -> (i32, &'static str, &'static str) {
+        match self {
+            ConfirmAction::DeleteGroup(_) => (0, "删除分组", "删除"),
+            ConfirmAction::DeletePet(_) => (0, "删除桌宠", "删除"),
+            ConfirmAction::ImportReplace(_) => (1, "导入并替换", "替换导入"),
+        }
+    }
+}
+
+/// 弹确认框;标题/样式/按钮由动作决定,确认时执行 on_confirm_ok
+fn ask_confirm(app: &Rc<App>, action: ConfirmAction, msg: String) {
+    let (kind, title, label) = action.dialog();
+    app.state.borrow_mut().confirm_action = Some(action);
+    app.settings_win.set_confirm_kind(kind);
+    app.settings_win.set_confirm_title(title.into());
+    app.settings_win.set_confirm_action_label(label.into());
+    app.settings_win.set_confirm_msg(msg.into());
+    app.settings_win.set_confirm_visible(true);
 }
 
 struct State {
@@ -449,8 +476,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let active_group = settings
         .last_group
-        .as_ref()
-        .and_then(|id| data.groups.iter().position(|g| &g.id == id))
+        .as_deref()
+        .and_then(|id| data.group_pos(id))
         .unwrap_or(0);
 
     let app = Rc::new(App {
@@ -1547,12 +1574,12 @@ fn wire_settings(app: &Rc<App>) {
     // 删除分组:有短语才弹确认(几十上百条光靠 3s 撤销容易错过),空分组直接删;两者都可撤销
     let a = app.clone();
     app.settings_win.on_group_delete(move || {
-        let (gi, msg) = {
+        let (id, msg) = {
             let st = a.state.borrow();
             match st.data.groups.get(st.active_group) {
-                Some(g) if g.phrases.is_empty() => (st.active_group, None),
+                Some(g) if g.phrases.is_empty() => (g.id.clone(), None),
                 Some(g) => (
-                    st.active_group,
+                    g.id.clone(),
                     Some(format!(
                         "将删除「{}」及其中 {} 条常用语。删除后 {UNDO_SECS} 秒内可撤销。",
                         g.name,
@@ -1562,26 +1589,17 @@ fn wire_settings(app: &Rc<App>) {
                 None => return,
             }
         };
-        let Some(msg) = msg else {
-            delete_group(&a, gi);
-            return;
-        };
-        a.state.borrow_mut().confirm_action = Some(ConfirmAction::DeleteGroup);
-        a.settings_win.set_confirm_kind(0);
-        a.settings_win.set_confirm_action_label("删除".into());
-        a.settings_win.set_confirm_title("删除分组".into());
-        a.settings_win.set_confirm_msg(msg.into());
-        a.settings_win.set_confirm_visible(true);
+        match msg {
+            Some(msg) => ask_confirm(&a, ConfirmAction::DeleteGroup(id), msg),
+            None => delete_group(&a, &id),
+        }
     });
 
     let a = app.clone();
     app.settings_win.on_confirm_ok(move || {
         let action = a.state.borrow_mut().confirm_action.take();
         match action {
-            Some(ConfirmAction::DeleteGroup) => {
-                let gi = a.state.borrow().active_group;
-                delete_group(&a, gi);
-            }
+            Some(ConfirmAction::DeleteGroup(id)) => delete_group(&a, &id),
             Some(ConfirmAction::DeletePet(id)) => delete_pet(&a, &id),
             Some(ConfirmAction::ImportReplace(data)) => apply_import(&a, data),
             None => {}
@@ -1679,14 +1697,11 @@ fn wire_settings(app: &Rc<App>) {
         else {
             return;
         };
-        a.state.borrow_mut().confirm_action = Some(ConfirmAction::DeletePet(id));
-        a.settings_win.set_confirm_kind(0);
-        a.settings_win.set_confirm_action_label("删除".into());
-        a.settings_win.set_confirm_title("删除桌宠".into());
-        a.settings_win.set_confirm_msg(
-            format!("将从 ~/.petdex/pets 与 ~/.codex/pets 删除「{name}」的文件(Codex 中也将不再可用),此操作不可撤销。可在「发现更多」重新安装。").into(),
+        ask_confirm(
+            &a,
+            ConfirmAction::DeletePet(id),
+            format!("将从 ~/.petdex/pets 与 ~/.codex/pets 删除「{name}」的文件(Codex 中也将不再可用),此操作不可撤销。可在「发现更多」重新安装。"),
         );
-        a.settings_win.set_confirm_visible(true);
     });
 
     let a = app.clone();
@@ -1864,12 +1879,7 @@ fn wire_settings(app: &Rc<App>) {
             cur_g,
             cur_p
         );
-        a.state.borrow_mut().confirm_action = Some(ConfirmAction::ImportReplace(data));
-        a.settings_win.set_confirm_kind(1);
-        a.settings_win.set_confirm_action_label("替换导入".into());
-        a.settings_win.set_confirm_title("导入并替换".into());
-        a.settings_win.set_confirm_msg(msg.into());
-        a.settings_win.set_confirm_visible(true);
+        ask_confirm(&a, ConfirmAction::ImportReplace(data), msg);
     });
 
     // ---- 关于与更新 ----

@@ -37,6 +37,13 @@ pub struct PhraseData {
     pub groups: Vec<Group>,
 }
 
+impl PhraseData {
+    /// 按 id 找分组下标。下标随增删/拖拽变动,跨交互保存的目标(上次分组、待确认的删除)要存 id
+    pub fn group_pos(&self, id: &str) -> Option<usize> {
+        self.groups.iter().position(|g| g.id == id)
+    }
+}
+
 impl Default for PhraseData {
     fn default() -> Self {
         PhraseData {
@@ -333,6 +340,25 @@ mod tests {
             .push(Phrase::new("x".into(), "测试".into()));
         save_phrases(dir.path(), &data).unwrap();
         assert_eq!(load_phrases(dir.path()), data);
+    }
+
+    #[test]
+    fn group_pos_follows_id_across_reorder() {
+        let g = |id: &str| Group {
+            id: id.into(),
+            name: id.into(),
+            icon: None,
+            phrases: Vec::new(),
+        };
+        let mut data = PhraseData {
+            groups: vec![g("a"), g("b"), g("c")],
+        };
+        assert_eq!(data.group_pos("b"), Some(1));
+        // 确认框开着时分组被拖拽/删除:按 id 仍找到原目标,目标没了就找不到
+        data.groups.swap(0, 1);
+        assert_eq!(data.group_pos("b"), Some(0));
+        data.groups.remove(0);
+        assert_eq!(data.group_pos("b"), None);
     }
 
     #[test]
