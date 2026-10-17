@@ -307,6 +307,9 @@ struct State {
     last_frame_ms: u32,
     /// 在线宠物库(设置窗「发现更多」打开时加载,关窗即释放)
     gallery: Option<GalleryState>,
+    /// 安装中的宠物 slug。安装线程比设置窗活得久,放进随关窗释放的 GalleryState 会丢:
+    /// 关窗重开后同一只能再装一次,两个线程共用临时目录互相删文件
+    installing: HashSet<String>,
 }
 
 /// 托盘图标与菜单一起建、一起 drop(drop 即移除图标)
@@ -327,7 +330,6 @@ struct GalleryState {
     thumbs: HashMap<String, slint::Image>,
     /// 已尝试过拉缩略图的 slug(失败的不反复重试)
     thumb_tried: HashSet<String>,
-    installing: HashSet<String>,
     /// 关窗/重开后,旧的后台结果据此丢弃
     token: u64,
 }
@@ -507,6 +509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             next_special: rand_idle_ms(),
             last_frame_ms: 0,
             gallery: None,
+            installing: HashSet::new(),
         }),
         hide_timer: slint::Timer::default(),
         move_timer: slint::Timer::default(),
@@ -2084,7 +2087,7 @@ fn refresh_gallery(app: &Rc<App>) {
                     .any(|lp| lp.id == p.slug && lp.error.is_none())
                 {
                     2
-                } else if g.installing.contains(&p.slug) {
+                } else if st.installing.contains(&p.slug) {
                     1
                 } else {
                     0
@@ -2162,23 +2165,15 @@ fn gallery_install(app: &Rc<App>, idx: usize) {
         select_pet(app, &pet.slug);
         return;
     }
-    {
-        let mut st = app.state.borrow_mut();
-        let Some(g) = st.gallery.as_mut() else {
-            return;
-        };
-        if !g.installing.insert(pet.slug.clone()) {
-            return; // 已在安装中
-        }
+    if !app.state.borrow_mut().installing.insert(pet.slug.clone()) {
+        return; // 已在安装中
     }
     refresh_gallery(app);
     std::thread::spawn(move || {
         let result = gallery::install(&pet, &petdex_install_roots());
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|a| {
-                if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
-                    g.installing.remove(&pet.slug);
-                }
+                a.state.borrow_mut().installing.remove(&pet.slug);
                 match result {
                     Ok(()) => {
                         refresh_pets(a);

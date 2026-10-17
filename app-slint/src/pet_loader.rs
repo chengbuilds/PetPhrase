@@ -97,7 +97,12 @@ pub fn scan_pets(roots: &[&Path]) -> Vec<PetInfo> {
         let Ok(entries) = fs::read_dir(root) else {
             continue;
         };
-        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        // 点开头的是安装暂存/挪开的旧包(.<slug>.part / .old),不是宠物;petdex slug 不会以点开头
+        let mut dirs: Vec<_> = entries
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| e.path())
+            .collect();
         dirs.sort();
         for dir in dirs {
             if let Some(pet) = load_pet(&dir) {
@@ -178,6 +183,17 @@ mod tests {
         assert_eq!(pets[0].id, "kun-like");
         assert!(pets[0].error.is_none());
         assert!(pets[0].spritesheet.ends_with("spritesheet.webp"));
+    }
+
+    #[test]
+    fn skips_install_staging_dirs() {
+        let root = tempdir().unwrap();
+        make_pet(root.path(), "kun-like", Some("{}"), Some("spritesheet.webp"));
+        make_pet(root.path(), ".kun-like.part", Some("{}"), Some("spritesheet.webp"));
+        make_pet(root.path(), ".kun-like.old", Some("{}"), None);
+        let pets = scan_pets(&[root.path()]);
+        assert_eq!(pets.len(), 1);
+        assert_eq!(pets[0].id, "kun-like");
     }
 
     #[test]
