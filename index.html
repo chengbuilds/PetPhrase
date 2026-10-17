@@ -28,7 +28,7 @@
   "operatingSystem": "Windows 10, Windows 11",
   "applicationCategory": "UtilitiesApplication",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
-  "softwareVersion": "0.7.0",
+  "softwareVersion": "0.8.0",
   "downloadUrl": "https://github.com/chengbuilds/PetPhrase/releases/latest",
   "screenshot": "https://chengbuilds.github.io/PetPhrase/img/panel.png",
   "license": "https://github.com/chengbuilds/PetPhrase/blob/main/LICENSE",
@@ -50,7 +50,7 @@
     { "@type": "Question", "name": "安装时 Windows SmartScreen 提示怎么办?",
       "acceptedAnswer": { "@type": "Answer", "text": "安装包未购买代码签名证书,SmartScreen 会提示「Windows 已保护你的电脑」。点「更多信息」→「仍要运行」即可。代码全部开源,安装包由仓库源码构建,每个版本附 SHA256 校验文件。" } },
     { "@type": "Question", "name": "怎么更换桌宠形象?",
-      "acceptedAnswer": { "@type": "Answer", "text": "PetPhrase 兼容 petdex 桌宠格式。在 petdex.dev 挑一只,npx petdex install 宠物名 一行命令装好,设置里点选即换,无需重启。也支持自定义 pet.json + 雪碧图。" } },
+      "acceptedAnswer": { "@type": "Answer", "text": "PetPhrase 兼容 petdex 桌宠格式。打开设置 →「桌宠」→「发现更多」,浏览、搜索 petdex.dev 上的数千只桌宠,点「安装」即下载并切换,无需 Node.js、无需重启。习惯命令行也可用 npx petdex@latest install 宠物名。也支持自定义 pet.json + 雪碧图。" } },
     { "@type": "Question", "name": "PetPhrase 占用资源高吗?",
       "acceptedAnswer": { "@type": "Answer", "text": "Rust + Slint 单进程原生应用,不内嵌浏览器内核:安装包不到 10MB,常驻内存约为 WebView 同类方案的 1/10,冷启动秒开。" } },
     { "@type": "Question", "name": "我的常用语数据存在哪里?会上传吗?",
@@ -108,8 +108,6 @@ nav.site a:hover { color: var(--accent-deep); text-decoration: none; }
 .bubble { z-index: 2; }
 .hero-visual img.pet {
   position: absolute; right: 18px; bottom: 0; width: 170px; z-index: 1;
-  image-rendering: pixelated;
-  filter: drop-shadow(0 10px 18px #0f172a22);
 }
 @media (max-width: 820px) {
   .hero { grid-template-columns: 1fr; }
@@ -138,10 +136,7 @@ h2 + .lede { color: var(--muted); margin-bottom: 36px; max-width: 640px; }
 
 .petdex-box { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 34px; }
 .petdex-box code.block { display: block; background: #1e293b; color: #fde68a; border-radius: 10px; padding: 14px 18px; font-size: .9rem; margin: 14px 0; overflow-x: auto; font-family: Consolas, monospace; }
-.petdex-pets { display: flex; gap: 20px; }
-.petdex-pets figure { text-align: center; }
-.petdex-pets img { width: 96px; image-rendering: pixelated; }
-.petdex-pets figcaption { font-size: .8rem; color: var(--muted); font-family: Consolas, monospace; }
+.petdex-shot { width: 420px; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 22px #0f172a14; }
 @media (max-width: 820px) { .petdex-box { grid-template-columns: 1fr; } }
 
 .faq details { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 22px; margin-bottom: 12px; transition: border-color .15s; }
@@ -184,8 +179,8 @@ footer.site .links { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 1
   <div class="hero-visual" aria-hidden="true">
     <span class="bubble" style="top: 8%; right: 6%;">您好,请问有什么可以帮您?</span>
     <span class="bubble" style="top: 32%; right: 18%;">好的,马上为您处理</span>
-    <span class="bubble" style="top: 56%; right: 40%;">收到,感谢您的反馈</span>
-    <span class="bubble accent" style="bottom: 18%; right: 62%;">已复制 ✓</span>
+    <span class="bubble" style="top: 56%; right: 44%;">收到,感谢您的反馈</span>
+    <span class="bubble accent" style="bottom: 4%; right: 50%;">已复制 ✓</span>
     <img class="pet" src="img/pet-hero.png" alt="PetPhrase Windows 桌宠">
   </div>
 </section>
@@ -197,7 +192,7 @@ footer.site .links { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 1
   <div class="shots">
     <figure><img src="img/pet-desktop.png" alt="Windows 桌宠悬浮在桌面上" loading="lazy"><figcaption>桌宠静坐桌面</figcaption></figure>
     <figure><img src="img/panel.png" alt="点击桌宠弹出的常用语快捷复制面板" loading="lazy"><figcaption>点它,面板贴宠弹出</figcaption></figure>
-    <figure><img src="img/settings-pets.png" alt="桌宠选择、大小与主题外观设置窗口" loading="lazy"><figcaption>挑桌宠、调大小、换主题</figcaption></figure>
+    <figure><img src="img/settings-pets.png" alt="已安装桌宠选择与大小设置窗口" loading="lazy"><figcaption>挑桌宠、调大小</figcaption></figure>
     <figure><img src="img/settings-phrases.png" alt="常用语分组与短语管理设置窗口" loading="lazy"><figcaption>管理分组与常用语</figcaption></figure>
   </div>
 </section>
@@ -219,16 +214,15 @@ footer.site .links { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 1
 <section id="petdex" aria-labelledby="petdex-heading">
   <p class="kicker">petdex 生态</p>
   <h2 id="petdex-heading">换一只喜欢的桌宠</h2>
-  <p class="lede">兼容 <a href="https://petdex.dev/">petdex</a> 桌宠格式——在 X 上火过的 Codex 桌宠生态,一行命令装新宠,设置里点选即换,无需重启。</p>
+  <p class="lede">兼容 <a href="https://petdex.dev/">petdex</a> 桌宠格式——在 X 上火过的 Codex 桌宠生态。设置里点「发现更多」,数千只桌宠一键安装,即装即换,无需重启。</p>
   <div class="petdex-box">
     <div>
+      <p>打开设置 →「桌宠」→「发现更多」,浏览、搜索 petdex 上的全部桌宠,点「安装」即下载并切换,<strong>无需 Node.js</strong>。不想要的在「已安装」里一键删除。</p>
+      <p style="font-size:.9rem;color:var(--muted);margin-top:14px">习惯命令行也可以用官方 CLI(需要 Node.js),装好的同样出现在「已安装」里:</p>
       <code class="block">npx petdex@latest install kun-like</code>
       <p style="font-size:.9rem;color:var(--muted)">也支持完全自定义:任意目录放 <code style="background:var(--accent-soft);border-radius:5px;padding:1px 7px;font-family:Consolas,monospace">pet.json + 雪碧图</code>,设置里指定即可。</p>
     </div>
-    <div class="petdex-pets">
-      <figure><img src="img/kun-like.png" alt="petdex 桌宠 kun-like" loading="lazy"><figcaption>kun-like</figcaption></figure>
-      <figure><img src="img/doraemon.png" alt="petdex 桌宠 doraemon 哆啦A梦" loading="lazy"><figcaption>doraemon</figcaption></figure>
-    </div>
+    <img class="petdex-shot" src="img/settings-gallery.png" alt="设置「发现更多」:在线浏览、搜索并一键安装 petdex 桌宠" loading="lazy">
   </div>
 </section>
 
@@ -240,7 +234,7 @@ footer.site .links { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 1
   <details><summary>支持哪些系统?有 macOS / Linux 版吗?</summary><p>目前支持 Windows 10 / 11 x64。UI 框架 Slint 本身跨平台,核心逻辑与平台无关,欢迎 macOS / Linux 移植 PR。</p></details>
   <details><summary>和剪贴板历史工具有什么区别?</summary><p>剪贴板历史记录的是「你复制过什么」,PetPhrase 管理的是「你反复要用什么」——固定短语库按分组整理,点桌宠即取,不会被新复制的内容冲掉。两者互补,不冲突。</p></details>
   <details><summary>安装时 Windows SmartScreen 提示「已保护你的电脑」怎么办?</summary><p>安装包未购买代码签名证书,SmartScreen 会对未签名程序提示。点<strong>「更多信息」→「仍要运行」</strong>即可。代码全部开源,安装包由仓库源码构建,每个版本附 SHA256 校验文件,可自行核验。</p></details>
-  <details><summary>怎么更换桌宠形象?</summary><p>在 <a href="https://petdex.dev/">petdex.dev</a> 挑一只,<code>npx petdex@latest install 宠物名</code> 一行命令装好,打开设置点选即换,无需重启。也支持自定义 <code>pet.json</code> + 雪碧图。</p></details>
+  <details><summary>怎么更换桌宠形象?</summary><p>打开设置 →「桌宠」→「发现更多」,浏览、搜索 <a href="https://petdex.dev/">petdex.dev</a> 上的数千只桌宠,点「安装」即下载并切换,无需 Node.js、无需重启。习惯命令行也可用 <code>npx petdex@latest install 宠物名</code>。也支持自定义 <code>pet.json</code> + 雪碧图。</p></details>
   <details><summary>占用资源高吗?会拖慢电脑吗?</summary><p>Rust + Slint 单进程原生应用,不内嵌浏览器内核:安装包不到 10MB,常驻内存约为 WebView 同类方案的 1/10,冷启动秒开,后台安静不打扰。</p></details>
   <details><summary>我的常用语数据存在哪里?会上传吗?</summary><p>全部数据保存在本机 <code>%APPDATA%\PetPhrase</code>,原子写入并自动备份,支持 JSON 导入导出。除了检查新版本,应用不联网,任何内容都不会上传。</p></details>
   <details><summary>如何升级到新版本?</summary><p>内置一键更新:自动或手动检查 GitHub Releases,发现新版一键下载,SHA256 校验后静默升级,装完自动回到桌面,数据不丢。</p></details>
