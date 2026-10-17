@@ -8,6 +8,7 @@ mod gallery;
 mod logic;
 mod pet_loader;
 mod storage;
+mod taskbar;
 mod updater;
 
 use anim::{Animator, PetState};
@@ -265,8 +266,8 @@ struct State {
     update: Option<updater::Update>,
     /// 检查/下载进行中,防重入
     update_busy: bool,
-    /// 托盘「检查更新」项句柄,发现新版后改文案
-    update_menu: Option<tray_icon::menu::MenuItem>,
+    /// 托盘;任务栏模式下为 None(不建托盘)
+    tray: Option<Tray>,
     /// 确认框按下「确认」后要执行的动作
     confirm_action: Option<ConfirmAction>,
     /// 单槽删除撤销
@@ -277,6 +278,15 @@ struct State {
     last_frame_ms: u32,
     /// 在线宠物库(设置窗「发现更多」打开时加载,关窗即释放)
     gallery: Option<GalleryState>,
+}
+
+/// 托盘图标与菜单一起建、一起 drop(drop 即移除图标)
+struct Tray {
+    _icon: tray_icon::TrayIcon,
+    /// 菜单项 id,下标即 on_tray_menu 的动作序号
+    ids: [tray_icon::menu::MenuId; 4],
+    /// 「检查更新」项,发现新版后改文案
+    update_item: tray_icon::menu::MenuItem,
 }
 
 #[derive(Default)]
@@ -460,7 +470,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             panel_resume_after_settings: false,
             update: None,
             update_busy: false,
-            update_menu: None,
+            tray: None,
             confirm_action: None,
             last_deleted: None,
             idle_ms: 0,
@@ -485,7 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wire_panel(&app);
     wire_settings(&app);
     schedule_frame(&app, 0);
-    let _tray = setup_tray(&app)?;
+    wire_tray_events();
 
     // 启动 10s 后静默检查一次更新;此后每 24h 重查一次
     // (开机自启用户一挂数周,只查启动那一次等于永远不查)
@@ -551,8 +561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     app.pet.show()?;
-    // 落位 + 原生属性(跳任务栏);恢复坐标后钳制到可见显示器,
-    // 换显示器/改缩放留下的屏外坐标会让宠永远找不到
+    // 落位;建窗后钳制到可见显示器(换显示器/改缩放留下的屏外坐标会让宠永远找不到)并套用图标位置
     {
         let st = app.state.borrow();
         if let Some((x, y)) = st.settings.pet_pos {
@@ -561,15 +570,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_position(slint::PhysicalPosition::new(x, y));
         }
     }
-    clamp_pet_to_screen(&app);
-    app.pet
-        .window()
-        .with_winit_window(|w: &winit::window::Window| {
-            use winit::platform::windows::WindowExtWindows;
-            w.set_skip_taskbar(true);
-        });
+    // winit 0.30 只能在事件循环里建窗:show() 之后到循环跑起来之前 with_winit_window 拿不到窗口,
+    // 原生设置在这里同步调用会静默落空(启动钳制与跳任务栏一直没生效即此),等窗口真建出来再做
+    {
+        let a = app.clone();
+        slint::spawn_local(async move {
+            if let Err(e) = a.pet.window().winit_window().await {
+                dbg_log(&format!("pet window not created: {e}"));
+                return;
+            }
+            clamp_pet_to_screen(&a);
+            if let Err(e) = apply_icon_place(&a) {
+                rfd::MessageDialog::new()
+                    .set_title("PetPhrase 无法启动")
+                    .set_description(format!("系统托盘图标创建失败:{e}"))
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                quit_app(&a);
+            }
+        })?;
+    }
 
     slint::run_event_loop_until_quit()?;
+    // APP 在 thread_local 里,进程退出时未必析构;显式移除托盘图标,免得残留幽灵图标
+    app.state.borrow_mut().tray = None;
     Ok(())
 }
 
@@ -632,9 +656,20 @@ fn assert_topmost(win: &slint::Window) {
     });
 }
 
-/// 托盘找回/二实例唤醒共用:显示、钳回屏内、重申置顶、挥手打招呼
+/// 宠物窗口是否最小化(直接问系统:Slint 自己的状态要等 Resized 才同步,滞后于最小化时的 Moved)
+fn pet_minimized(app: &Rc<App>) -> bool {
+    app.pet
+        .window()
+        .with_winit_window(|w: &winit::window::Window| w.is_minimized() == Some(true))
+        .unwrap_or(false)
+}
+
+/// 托盘找回/二实例唤醒/切换图标位置共用:显示(含任务栏模式下的最小化还原)、钳回屏内、重申置顶、挥手打招呼
 fn recover_pet(app: &Rc<App>) {
     let _ = app.pet.show();
+    app.pet
+        .window()
+        .with_winit_window(|w: &winit::window::Window| w.set_minimized(false));
     clamp_pet_to_screen(app);
     assert_topmost(app.pet.window());
     app.state.borrow_mut().animator.play_once(PetState::Wave);
@@ -661,9 +696,29 @@ fn wire_pet(app: &Rc<App>) {
             });
     });
 
-    // 拖完保存位置(去抖 500ms);常驻开启时面板实时跟随
+    // 任务栏模式:右键任务栏按钮「关闭窗口」= 退出(按钮随宠物窗口,只隐藏就再也找不回);
+    // 托盘模式保持收进托盘
+    let a = app.clone();
+    app.pet.window().on_close_requested(move || {
+        if a.state.borrow().settings.show_in_taskbar {
+            quit_app(&a);
+            slint::CloseRequestResponse::KeepWindowShown
+        } else {
+            hide_panel(&a);
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+
+    // 拖完保存位置(去抖 500ms);常驻开启时面板实时跟随。
+    // 最小化(任务栏模式点按钮收起)时坐标是系统占位 -32000,不存,并收起面板
     let a = app.clone();
     app.pet.window().on_winit_window_event(move |_, event| {
+        if pet_minimized(&a) {
+            if a.panel.window().is_visible() {
+                hide_panel(&a);
+            }
+            return slint::winit_030::EventResult::Propagate;
+        }
         if let winit::event::WindowEvent::Moved(pos) = event {
             if a.panel.get_pinned() && a.panel.window().is_visible() {
                 if let Some(p) = compute_panel_placement(&a) {
@@ -1142,8 +1197,7 @@ fn ensure_panel_native(app: &Rc<App>) {
     app.panel
         .window()
         .with_winit_window(|w: &winit::window::Window| {
-            use winit::platform::windows::WindowExtWindows;
-            w.set_skip_taskbar(true);
+            taskbar::set_on_taskbar(w, false);
             acrylic_ok = window_vibrancy::apply_acrylic(w, Some((255, 255, 255, 170))).is_ok();
         });
     // acrylic 失败或用户选实底 → solid
@@ -1634,6 +1688,24 @@ fn wire_settings(app: &Rc<App>) {
     });
 
     let a = app.clone();
+    app.settings_win.on_taskbar_toggled(move |on| {
+        a.state.borrow_mut().settings.show_in_taskbar = on;
+        if let Err(e) = apply_icon_place(&a) {
+            // 托盘建不起来就留在任务栏模式,别让用户两头都没入口
+            a.state.borrow_mut().settings.show_in_taskbar = true;
+            set_data_msg(&a, &format!("⚠ 系统托盘图标创建失败:{e}"), true);
+        }
+        let on = a.state.borrow().settings.show_in_taskbar;
+        a.settings_win.set_taskbar_mode(on);
+        persist_settings(&a);
+        // 隐藏的宠在任务栏模式下没有按钮,最小化的宠在托盘模式下回不来:切换后一律找回
+        recover_pet(&a);
+    });
+
+    let a = app.clone();
+    app.settings_win.on_quit_app(move || quit_app(&a));
+
+    let a = app.clone();
     app.settings_win.on_sort_toggled(move |on| {
         a.state.borrow_mut().settings.sort_by_use = on;
         persist_settings(&a);
@@ -1750,6 +1822,8 @@ fn wire_settings(app: &Rc<App>) {
         .set_auto_check_on(app.state.borrow().settings.auto_check_update);
     app.settings_win
         .set_sort_by_use(app.state.borrow().settings.sort_by_use);
+    app.settings_win
+        .set_taskbar_mode(app.state.borrow().settings.show_in_taskbar);
 
     let a = app.clone();
     app.settings_win
@@ -2083,10 +2157,8 @@ fn start_update_check(app: &Rc<App>, manual: bool) {
                         a.settings_win
                             .set_update_msg(format!("发现新版 v{}", u.version).into());
                         a.settings_win.set_update_available(true);
-                        if let Some(item) = &a.state.borrow().update_menu {
-                            item.set_text(format!("升级到 v{}", u.version));
-                        }
                         a.state.borrow_mut().update = Some(u);
+                        sync_update_menu(a);
                     }
                     Ok(None) => {
                         if manual {
@@ -2170,7 +2242,7 @@ fn autostart_handle() -> Result<auto_launch::AutoLaunch, String> {
 
 /* ================= 托盘 ================= */
 
-fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::Error>> {
+fn setup_tray(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
     use tray_icon::menu::{Menu, MenuItem};
 
     let icon_png = include_bytes!("../assets/icon.png");
@@ -2188,7 +2260,7 @@ fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::
     menu.append(&update_item)?;
     menu.append(&quit)?;
 
-    let tray = tray_icon::TrayIconBuilder::new()
+    let icon = tray_icon::TrayIconBuilder::new()
         .with_icon(icon)
         .with_tooltip("PetPhrase")
         .with_menu(Box::new(menu))
@@ -2202,44 +2274,60 @@ fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::
         update_item.id().clone(),
         quit.id().clone(),
     ];
-    app.state.borrow_mut().update_menu = Some(update_item);
+    app.state.borrow_mut().tray = Some(Tray {
+        _icon: icon,
+        ids,
+        update_item,
+    });
+    sync_update_menu(app); // 托盘重建时恢复「升级到 vX」文案
+    Ok(())
+}
 
-    // 事件推送取代 150ms 轮询。回调在 Win32 消息过程里同步触发,
-    // 统一 invoke_from_event_loop 延后执行,避开与正在进行的 RefCell 借用重入
-    tray_icon::TrayIconEvent::set_event_handler(Some(|ev| {
-        // 托盘图标左键单击 = 显示/找回宠(桌面软件惯例;菜单只挂在右键)
+/// 托盘事件处理器全程只注册一次:tray-icon/muda 的 set_event_handler 存在全局 OnceCell 里,
+/// 再次注册被静默丢弃(托盘重建后菜单全失灵即此)。处理器只转发 id,动作按当前 Tray 的 ids 现查。
+/// 回调在 Win32 消息过程里同步触发,统一 invoke_from_event_loop 延后执行,避开与正在进行的 RefCell 借用重入
+fn wire_tray_events() {
+    tray_icon::TrayIconEvent::set_event_handler(Some(|ev: tray_icon::TrayIconEvent| {
+        if !matches!(ev, tray_icon::TrayIconEvent::Move { .. }) {
+            dbg_log(&format!("tray event {ev:?}"));
+        }
+        // 托盘图标左键单击 = 显示/隐藏宠物(同菜单首项;菜单只挂在右键)
         if let tray_icon::TrayIconEvent::Click {
             button: tray_icon::MouseButton::Left,
             button_state: tray_icon::MouseButtonState::Up,
             ..
         } = ev
         {
-            let _ = slint::invoke_from_event_loop(|| with_app(recover_pet));
+            let _ = slint::invoke_from_event_loop(|| with_app(toggle_pet));
         }
     }));
-    tray_icon::menu::MenuEvent::set_event_handler(Some(move |ev: tray_icon::menu::MenuEvent| {
-        let Some(which) = ids.iter().position(|id| *id == ev.id) else {
-            return;
-        };
-        let _ = slint::invoke_from_event_loop(move || with_app(|a| on_tray_menu(a, which)));
+    tray_icon::menu::MenuEvent::set_event_handler(Some(|ev: tray_icon::menu::MenuEvent| {
+        let _ = slint::invoke_from_event_loop(move || with_app(|a| on_tray_menu(a, &ev.id)));
     }));
-
-    Ok(tray)
 }
 
-/// 托盘菜单动作,which = setup_tray 里 ids 的下标
-fn on_tray_menu(a: &Rc<App>, which: usize) {
+/// 显示/隐藏宠物(托盘左键与菜单首项共用)
+fn toggle_pet(a: &Rc<App>) {
+    if a.pet.window().is_visible() {
+        let _ = a.pet.window().hide();
+        hide_panel(a);
+    } else {
+        recover_pet(a); // 顺带钳回屏内+重申置顶,屏外宠靠这里找回
+    }
+}
+
+/// 托盘菜单动作:按当前托盘的 ids 现查序号
+fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
+    let which = a
+        .state
+        .borrow()
+        .tray
+        .as_ref()
+        .and_then(|t| t.ids.iter().position(|x| x == id));
     match which {
-        0 => {
-            if a.pet.window().is_visible() {
-                let _ = a.pet.window().hide();
-                hide_panel(a);
-            } else {
-                recover_pet(a); // 顺带钳回屏内+重申置顶,屏外宠靠这里找回
-            }
-        }
-        1 => open_settings(a),
-        2 => {
+        Some(0) => toggle_pet(a),
+        Some(1) => open_settings(a),
+        Some(2) => {
             // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
             open_settings(a);
             a.settings_win.set_page(2);
@@ -2250,12 +2338,42 @@ fn on_tray_menu(a: &Rc<App>, which: usize) {
                 start_update_check(a, true);
             }
         }
-        _ => {
-            // 拖宠位置保存有 500ms 去抖,退出前无条件落一次盘防丢(隐藏窗口的 position() 依然有效)
-            let pos = a.pet.window().position();
-            a.state.borrow_mut().settings.pet_pos = Some((pos.x, pos.y));
-            persist_settings(a);
-            let _ = slint::quit_event_loop();
-        }
+        Some(_) => quit_app(a),
+        None => {}
     }
+}
+
+/// 托盘「检查更新」项文案随已发现的新版走
+fn sync_update_menu(app: &Rc<App>) {
+    let st = app.state.borrow();
+    if let (Some(t), Some(u)) = (&st.tray, &st.update) {
+        t.update_item.set_text(format!("升级到 v{}", u.version));
+    }
+}
+
+/// 图标位置(托盘/任务栏二选一)唯一落地点:启动与设置切换共用。
+/// 任务栏模式不建托盘(drop 即移除图标);宠物与面板的任务栏策略见 taskbar 模块
+fn apply_icon_place(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
+    let on_taskbar = app.state.borrow().settings.show_in_taskbar;
+    if on_taskbar {
+        app.state.borrow_mut().tray = None;
+    } else if app.state.borrow().tray.is_none() {
+        setup_tray(app)?;
+    }
+    app.pet
+        .window()
+        .with_winit_window(|w: &winit::window::Window| taskbar::set_on_taskbar(w, on_taskbar));
+    Ok(())
+}
+
+/// 退出唯一入口:托盘「退出」、设置「退出」、任务栏模式下关闭宠物窗口
+fn quit_app(a: &Rc<App>) {
+    // 拖宠位置保存有 500ms 去抖,退出前无条件落一次盘防丢(隐藏窗口的 position() 依然有效;
+    // 最小化时是系统占位坐标 -32000,不能存)
+    if !pet_minimized(a) {
+        let pos = a.pet.window().position();
+        a.state.borrow_mut().settings.pet_pos = Some((pos.x, pos.y));
+    }
+    persist_settings(a);
+    let _ = slint::quit_event_loop();
 }
