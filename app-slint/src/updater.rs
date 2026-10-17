@@ -78,7 +78,7 @@ fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-fn run_curl(args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_curl(args: &[&str]) -> Result<String, String> {
     let out = no_window(
         Command::new("curl.exe")
             .args(["-fsS", "-H", "User-Agent: PetPhrase"])

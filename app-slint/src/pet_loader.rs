@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PetInfo {
@@ -8,6 +8,8 @@ pub struct PetInfo {
     /// spritesheet 绝对路径;error 非空时为空串
     pub spritesheet: String,
     pub error: Option<String>,
+    /// 包目录(删除用;损坏的包没有 spritesheet 也要能删)
+    pub dir: PathBuf,
 }
 
 /// 单个宠物目录 → PetInfo。宽松校验:pet.json 可缺 name(用目录名),
@@ -65,6 +67,7 @@ fn load_pet(dir: &Path) -> Option<PetInfo> {
         name,
         spritesheet,
         error,
+        dir: dir.to_path_buf(),
     })
 }
 
