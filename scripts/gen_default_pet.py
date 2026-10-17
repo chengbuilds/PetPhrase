@@ -1,4 +1,4 @@
-"""导出内置默认宠「晨光」到 app-slint/pets/default/(spritesheet.webp + pet.json)。
+"""导出内置默认宠到 app-slint/pets/default/(spritesheet.webp + pet.json)。
 
 绘制源是同目录的 gen_default_pet.html(Canvas 逐帧绘制,双击可预览);
 这里用无头 Edge 打开它,读出页面写进 #out 的 WebP data URL 落盘。只依赖 Python 标准库 + 系统自带 Edge。
@@ -17,7 +17,7 @@ SHEET_W, SHEET_H = 192 * 8, 208 * 9
 
 PET_JSON = {
     "id": "default",
-    "displayName": "晨光",
+    "displayName": "PetPhrase",
     "description": "白色玻璃泡 + 七彩流光边(PetPhrase 内置)",
     "spritesheetPath": "spritesheet.webp",
 }
