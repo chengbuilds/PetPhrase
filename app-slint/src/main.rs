@@ -266,10 +266,8 @@ struct State {
     update: Option<updater::Update>,
     /// 检查/下载进行中,防重入
     update_busy: bool,
-    /// 托盘图标;任务栏模式下为 None(不建托盘)
-    tray: Option<tray_icon::TrayIcon>,
-    /// 托盘「检查更新」项句柄,发现新版后改文案
-    update_menu: Option<tray_icon::menu::MenuItem>,
+    /// 托盘;任务栏模式下为 None(不建托盘)
+    tray: Option<Tray>,
     /// 确认框按下「确认」后要执行的动作
     confirm_action: Option<ConfirmAction>,
     /// 单槽删除撤销
@@ -280,6 +278,15 @@ struct State {
     last_frame_ms: u32,
     /// 在线宠物库(设置窗「发现更多」打开时加载,关窗即释放)
     gallery: Option<GalleryState>,
+}
+
+/// 托盘图标与菜单一起建、一起 drop(drop 即移除图标)
+struct Tray {
+    _icon: tray_icon::TrayIcon,
+    /// 菜单项 id,下标即 on_tray_menu 的动作序号
+    ids: [tray_icon::menu::MenuId; 4],
+    /// 「检查更新」项,发现新版后改文案
+    update_item: tray_icon::menu::MenuItem,
 }
 
 #[derive(Default)]
@@ -464,7 +471,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             update: None,
             update_busy: false,
             tray: None,
-            update_menu: None,
             confirm_action: None,
             last_deleted: None,
             idle_ms: 0,
@@ -489,6 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wire_panel(&app);
     wire_settings(&app);
     schedule_frame(&app, 0);
+    wire_tray_events();
 
     // 启动 10s 后静默检查一次更新;此后每 24h 重查一次
     // (开机自启用户一挂数周,只查启动那一次等于永远不查)
@@ -2235,7 +2242,7 @@ fn autostart_handle() -> Result<auto_launch::AutoLaunch, String> {
 
 /* ================= 托盘 ================= */
 
-fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::Error>> {
+fn setup_tray(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
     use tray_icon::menu::{Menu, MenuItem};
 
     let icon_png = include_bytes!("../assets/icon.png");
@@ -2253,7 +2260,7 @@ fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::
     menu.append(&update_item)?;
     menu.append(&quit)?;
 
-    let tray = tray_icon::TrayIconBuilder::new()
+    let icon = tray_icon::TrayIconBuilder::new()
         .with_icon(icon)
         .with_tooltip("PetPhrase")
         .with_menu(Box::new(menu))
@@ -2267,45 +2274,60 @@ fn setup_tray(app: &Rc<App>) -> Result<tray_icon::TrayIcon, Box<dyn std::error::
         update_item.id().clone(),
         quit.id().clone(),
     ];
-    app.state.borrow_mut().update_menu = Some(update_item);
+    app.state.borrow_mut().tray = Some(Tray {
+        _icon: icon,
+        ids,
+        update_item,
+    });
     sync_update_menu(app); // 托盘重建时恢复「升级到 vX」文案
+    Ok(())
+}
 
-    // 事件推送取代 150ms 轮询。回调在 Win32 消息过程里同步触发,
-    // 统一 invoke_from_event_loop 延后执行,避开与正在进行的 RefCell 借用重入
-    tray_icon::TrayIconEvent::set_event_handler(Some(|ev| {
-        // 托盘图标左键单击 = 显示/找回宠(桌面软件惯例;菜单只挂在右键)
+/// 托盘事件处理器全程只注册一次:tray-icon/muda 的 set_event_handler 存在全局 OnceCell 里,
+/// 再次注册被静默丢弃(托盘重建后菜单全失灵即此)。处理器只转发 id,动作按当前 Tray 的 ids 现查。
+/// 回调在 Win32 消息过程里同步触发,统一 invoke_from_event_loop 延后执行,避开与正在进行的 RefCell 借用重入
+fn wire_tray_events() {
+    tray_icon::TrayIconEvent::set_event_handler(Some(|ev: tray_icon::TrayIconEvent| {
+        if !matches!(ev, tray_icon::TrayIconEvent::Move { .. }) {
+            dbg_log(&format!("tray event {ev:?}"));
+        }
+        // 托盘图标左键单击 = 显示/隐藏宠物(同菜单首项;菜单只挂在右键)
         if let tray_icon::TrayIconEvent::Click {
             button: tray_icon::MouseButton::Left,
             button_state: tray_icon::MouseButtonState::Up,
             ..
         } = ev
         {
-            let _ = slint::invoke_from_event_loop(|| with_app(recover_pet));
+            let _ = slint::invoke_from_event_loop(|| with_app(toggle_pet));
         }
     }));
-    tray_icon::menu::MenuEvent::set_event_handler(Some(move |ev: tray_icon::menu::MenuEvent| {
-        let Some(which) = ids.iter().position(|id| *id == ev.id) else {
-            return;
-        };
-        let _ = slint::invoke_from_event_loop(move || with_app(|a| on_tray_menu(a, which)));
+    tray_icon::menu::MenuEvent::set_event_handler(Some(|ev: tray_icon::menu::MenuEvent| {
+        let _ = slint::invoke_from_event_loop(move || with_app(|a| on_tray_menu(a, &ev.id)));
     }));
-
-    Ok(tray)
 }
 
-/// 托盘菜单动作,which = setup_tray 里 ids 的下标
-fn on_tray_menu(a: &Rc<App>, which: usize) {
+/// 显示/隐藏宠物(托盘左键与菜单首项共用)
+fn toggle_pet(a: &Rc<App>) {
+    if a.pet.window().is_visible() {
+        let _ = a.pet.window().hide();
+        hide_panel(a);
+    } else {
+        recover_pet(a); // 顺带钳回屏内+重申置顶,屏外宠靠这里找回
+    }
+}
+
+/// 托盘菜单动作:按当前托盘的 ids 现查序号
+fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
+    let which = a
+        .state
+        .borrow()
+        .tray
+        .as_ref()
+        .and_then(|t| t.ids.iter().position(|x| x == id));
     match which {
-        0 => {
-            if a.pet.window().is_visible() {
-                let _ = a.pet.window().hide();
-                hide_panel(a);
-            } else {
-                recover_pet(a); // 顺带钳回屏内+重申置顶,屏外宠靠这里找回
-            }
-        }
-        1 => open_settings(a),
-        2 => {
+        Some(0) => toggle_pet(a),
+        Some(1) => open_settings(a),
+        Some(2) => {
             // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
             open_settings(a);
             a.settings_win.set_page(2);
@@ -2316,15 +2338,16 @@ fn on_tray_menu(a: &Rc<App>, which: usize) {
                 start_update_check(a, true);
             }
         }
-        _ => quit_app(a),
+        Some(_) => quit_app(a),
+        None => {}
     }
 }
 
 /// 托盘「检查更新」项文案随已发现的新版走
 fn sync_update_menu(app: &Rc<App>) {
     let st = app.state.borrow();
-    if let (Some(item), Some(u)) = (&st.update_menu, &st.update) {
-        item.set_text(format!("升级到 v{}", u.version));
+    if let (Some(t), Some(u)) = (&st.tray, &st.update) {
+        t.update_item.set_text(format!("升级到 v{}", u.version));
     }
 }
 
@@ -2333,12 +2356,9 @@ fn sync_update_menu(app: &Rc<App>) {
 fn apply_icon_place(app: &Rc<App>) -> Result<(), Box<dyn std::error::Error>> {
     let on_taskbar = app.state.borrow().settings.show_in_taskbar;
     if on_taskbar {
-        let mut st = app.state.borrow_mut();
-        st.tray = None;
-        st.update_menu = None;
+        app.state.borrow_mut().tray = None;
     } else if app.state.borrow().tray.is_none() {
-        let tray = setup_tray(app)?;
-        app.state.borrow_mut().tray = Some(tray);
+        setup_tray(app)?;
     }
     app.pet
         .window()
