@@ -9,6 +9,8 @@ export enum SettingsPage { phrases, pets, general }
 export enum PetView { installed, gallery }
 /// 确认框样式:危险删除 / 导入替换
 export enum ConfirmKind { danger, replace }
+// 一键更新状态机在 UI 的投影(Rust UpdateState 是事实来源,只经 set_update_state 写入)
+export enum UpdatePhase { idle, checking, available, downloading }
 
 /// 宠物库卡片:缩略图 + 名称 + 状态按钮;已安装的点击即切换
 component GalleryCard inherits Rectangle {
@@ -218,8 +220,8 @@ export component SettingsWindow inherits Window {
     in property <string> app-version;
     in property <string> update-msg;
     in property <bool> update-msg-error;
-    in property <bool> update-available;
-    in property <bool> update-busy;
+    in property <UpdatePhase> update-phase;
+    property <bool> update-found: update-phase == UpdatePhase.available || update-phase == UpdatePhase.downloading;
     in-out property <bool> auto-check-on;
     in property <string> auto-check-desc;
     callback check-update;
@@ -956,16 +958,16 @@ export component SettingsWindow inherits Window {
                         HorizontalLayout {
                             alignment: end;
                             spacing: 8px;
-                            if !root.update-available: GhostButton {
+                            if !root.update-found: GhostButton {
                                 text: "检查更新";
                                 outlined: true;
                                 icon: @image-url("icons/refresh-cw.svg");
-                                enabled: !root.update-busy;
+                                enabled: root.update-phase == UpdatePhase.idle;
                                 clicked => { root.check-update(); }
                             }
-                            if root.update-available: PrimaryButton {
+                            if root.update-found: PrimaryButton {
                                 text: "立即更新";
-                                enabled: !root.update-busy;
+                                enabled: root.update-phase == UpdatePhase.available;
                                 clicked => { root.do-update(); }
                             }
                             GhostButton {
