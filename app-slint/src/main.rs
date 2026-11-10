@@ -276,6 +276,50 @@ fn ask_confirm(app: &Rc<App>, action: ConfirmAction, msg: String) {
     app.settings_win.set_confirm_visible(true);
 }
 
+/// 面板窗口阶段:显隐之外的那一半(真显隐仍以 window().is_visible() 为准)。
+/// 迁移只在 show_panel / stash_panel / open_settings / 面板焦点事件 / 设置窗关闭
+#[derive(Clone, Copy, PartialEq)]
+enum PanelPhase {
+    Hidden,
+    /// 常驻面板因打开设置而暂隐,设置关闭后恢复
+    Stashed,
+    /// 已 show、还没真正拿到过焦点:此时的 Focused(false) 不算失焦,不隐
+    AwaitingFocus,
+    Focused,
+}
+
+/// 就地编辑器目标(State.pending_edit 为 None = 编辑器关着)。存 id 不存下标:
+/// 编辑器开着时数据可能变(撤销删除把短语插回、设置窗增删拖拽),下标会指到另一条短语上
+enum EditTarget {
+    Add { group: String },
+    Edit { group: String, phrase: String },
+}
+
+/// 一键更新状态机,只经 set_update_state 迁移:
+/// Idle →检查→ Checking → Idle | Available →下载→ Downloading → 退出让路 | Available(失败可重试)
+enum UpdateState {
+    Idle,
+    Checking,
+    /// 已发现新版,「立即更新」据此下载
+    Available(updater::Update),
+    Downloading(updater::Update),
+}
+
+/// 面板条目的复制反馈:同一时刻至多一条,只经 set_copy_feedback 设
+enum CopyFeedback {
+    None,
+    Copied(i32),
+    Failed(i32),
+}
+
+/// 在线宠物库生命周期:Closed →进「发现更多」→ Loading → Ready;拉取失败/关设置窗回 Closed
+enum Gallery {
+    Closed,
+    /// 后台拉 manifest 中;token 对不上的旧结果丢弃
+    Loading(u64),
+    Ready(GalleryState),
+}
+
 struct State {
     data: storage::PhraseData,
     settings: storage::Settings,
@@ -288,16 +332,9 @@ struct State {
     /// 后台缩略图线程在跑(同一时刻只跑一个,补完后再看有没有新缺的)
     thumb_loading: bool,
     panel_native_ready: bool,
-    /// show 后是否真正拿到过焦点 —— 防初始 Focused(false) 误隐藏
-    panel_got_focus: bool,
-    /// 就地编辑器目标:(分组下标, Some(短语下标)=编辑 / None=新增)
-    pending_edit: Option<(usize, Option<usize>)>,
-    /// 常驻面板因打开设置而暂隐,设置关闭后恢复
-    panel_resume_after_settings: bool,
-    /// 已发现的新版本(检查成功后填入,「立即更新」据此下载)
-    update: Option<updater::Update>,
-    /// 检查/下载进行中,防重入
-    update_busy: bool,
+    panel_phase: PanelPhase,
+    pending_edit: Option<EditTarget>,
+    update: UpdateState,
     /// 托盘;任务栏模式下为 None(不建托盘)
     tray: Option<Tray>,
     /// 确认框按下「确认」后要执行的动作
@@ -309,7 +346,7 @@ struct State {
     next_special: u32,
     last_frame_ms: u32,
     /// 在线宠物库(设置窗「发现更多」打开时加载,关窗即释放)
-    gallery: Option<GalleryState>,
+    gallery: Gallery,
     /// 安装中的宠物 slug。安装线程比设置窗活得久,放进随关窗释放的 GalleryState 会丢:
     /// 关窗重开后同一只能再装一次,两个线程共用临时目录互相删文件
     installing: HashSet<String>,
@@ -327,7 +364,6 @@ struct Tray {
 
 #[derive(Default)]
 struct GalleryState {
-    loading: bool,
     pets: Vec<gallery::RemotePet>,
     filtered: Vec<usize>,
     page: usize,
@@ -508,18 +544,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             thumb_cache: HashMap::new(),
             thumb_loading: false,
             panel_native_ready: false,
-            panel_got_focus: false,
+            panel_phase: PanelPhase::Hidden,
             pending_edit: None,
-            panel_resume_after_settings: false,
-            update: None,
-            update_busy: false,
+            update: UpdateState::Idle,
             tray: None,
             confirm_action: None,
             last_deleted: None,
             idle_ms: 0,
             next_special: rand_idle_ms(),
             last_frame_ms: 0,
-            gallery: None,
+            gallery: Gallery::Closed,
             installing: HashSet::new(),
         }),
         hide_timer: slint::Timer::default(),
@@ -589,20 +623,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let a = app.clone();
         app.settings_win.window().on_close_requested(move || {
-            {
+            let resume = {
                 let mut st = a.state.borrow_mut();
                 st.thumb_cache.clear();
                 st.thumb_loading = false;
-                st.gallery = None;
-            }
+                st.gallery = Gallery::Closed;
+                // Stashed → Hidden;期间用户自己点宠开过面板的话阶段早已前进,不再重显
+                let stashed = st.panel_phase == PanelPhase::Stashed;
+                if stashed {
+                    st.panel_phase = PanelPhase::Hidden;
+                }
+                stashed
+            };
             THUMB_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // 在跑的缩略图线程作废
             a.settings_win.set_pet_view(PetView::Installed);
             a.settings_win
                 .set_gallery_cards(ModelRc::new(VecModel::from(Vec::<GalleryCardUi>::new())));
             a.settings_win
                 .set_pets(ModelRc::new(VecModel::from(Vec::<PetCardUi>::new())));
-            let resume = std::mem::take(&mut a.state.borrow_mut().panel_resume_after_settings);
-            if resume && a.panel.get_pinned() {
+            if resume {
                 show_panel(&a);
             }
             slint::CloseRequestResponse::HideWindow
@@ -792,10 +831,10 @@ fn wire_pet(app: &Rc<App>) {
 }
 
 /// 持续情境 → 动画 base:编辑审阅 > 面板等待 > 闲置。
-/// 面板显隐/编辑器开关/换动画机后调用,情境只在这里判定
+/// 面板显隐/浮层开关/换动画机后调用,情境只在这里判定
 fn update_pet_base(app: &Rc<App>) {
     let panel_open = app.panel.window().is_visible();
-    let base = if panel_open && app.panel.get_editor_open() {
+    let base = if panel_open && app.panel.get_overlay() == PanelOverlay::Editor {
         PetState::Review
     } else if panel_open {
         PetState::Waiting
@@ -961,8 +1000,27 @@ fn refresh_panel(app: &Rc<App>) {
     app.panel.set_searching(layout.searching);
     app.panel.set_list_h(layout.list_h);
     app.panel.set_show_grid_btn(show_grid);
-    app.panel.set_copied_idx(-1);
-    app.panel.set_failed_idx(-1);
+    set_copy_feedback(app, CopyFeedback::None);
+}
+
+fn set_copy_feedback(app: &Rc<App>, feedback: CopyFeedback) {
+    let (copied, failed) = match feedback {
+        CopyFeedback::None => (-1, -1),
+        CopyFeedback::Copied(i) => (i, -1),
+        CopyFeedback::Failed(i) => (-1, i),
+    };
+    app.panel.set_copied_idx(copied);
+    app.panel.set_failed_idx(failed);
+}
+
+/// 打开就地编辑器(编辑/新增共用):目标与浮层一起设。
+/// 关闭有两路,都会清目标:Slint 侧取消/Esc/点遮罩(on_overlay_changed)、隐藏面板(stash_panel)
+fn open_editor(app: &Rc<App>, target: EditTarget, text: &str) {
+    app.panel
+        .set_editor_is_add(matches!(target, EditTarget::Add { .. }));
+    app.panel.set_editor_text(text.into());
+    app.state.borrow_mut().pending_edit = Some(target);
+    app.panel.set_overlay(PanelOverlay::Editor);
 }
 
 fn wire_panel(app: &Rc<App>) {
@@ -1009,55 +1067,70 @@ fn wire_panel(app: &Rc<App>) {
     let a = app.clone();
     app.panel.on_undo_clicked(move || undo_delete(&a));
 
+    // 浮层开关:宠物情境动画跟着换;编辑器不在了,编辑目标随之作废
     let a = app.clone();
-    app.panel.on_editor_toggled(move || update_pet_base(&a));
+    app.panel.on_overlay_changed(move || {
+        if a.panel.get_overlay() != PanelOverlay::Editor {
+            a.state.borrow_mut().pending_edit = None;
+        }
+        update_pet_base(&a);
+    });
 
     // 编辑/添加:面板内就地编辑器,不跳设置窗
     let a = app.clone();
     app.panel.on_item_edit_requested(move |i| {
-        let Some((gi, pi, text)) = a
-            .state
-            .borrow()
-            .items
-            .get(i as usize)
-            .map(|it| (it.group_idx, it.phrase_idx, it.text.clone()))
-        else {
-            return;
+        let found = {
+            let st = a.state.borrow();
+            st.items.get(i as usize).and_then(|it| {
+                let g = st.data.groups.get(it.group_idx)?;
+                let p = g.phrases.get(it.phrase_idx)?;
+                let target = EditTarget::Edit {
+                    group: g.id.clone(),
+                    phrase: p.id.clone(),
+                };
+                Some((target, it.text.clone()))
+            })
         };
-        a.state.borrow_mut().pending_edit = Some((gi, Some(pi)));
-        a.panel.set_editor_is_add(false);
-        a.panel.set_editor_text(text.into());
-        a.panel.set_editor_open(true);
+        if let Some((target, text)) = found {
+            open_editor(&a, target, &text);
+        }
     });
 
-    // i < 0 = 空白区右键,落到当前分组
+    // i < 0 = 空白区右键,落到当前分组;一个分组都没有就不开
     let a = app.clone();
     app.panel.on_item_add_requested(move |i| {
-        let gi = {
+        let group = {
             let st = a.state.borrow();
-            if st.data.groups.is_empty() {
-                return;
-            }
-            st.items
+            let gi = st
+                .items
                 .get(i.max(0) as usize)
                 .filter(|_| i >= 0)
                 .map(|it| it.group_idx)
-                .unwrap_or(st.active_group.min(st.data.groups.len() - 1))
+                .unwrap_or(st.active_group.min(st.data.groups.len().saturating_sub(1)));
+            st.data.groups.get(gi).map(|g| g.id.clone())
         };
-        a.state.borrow_mut().pending_edit = Some((gi, None));
-        a.panel.set_editor_is_add(true);
-        a.panel.set_editor_text("".into());
-        a.panel.set_editor_open(true);
+        if let Some(group) = group {
+            open_editor(&a, EditTarget::Add { group }, "");
+        }
     });
 
     let a = app.clone();
     app.panel.on_editor_saved(move |text| {
-        let Some((gi, target)) = a.state.borrow_mut().pending_edit.take() else {
+        let Some(target) = a.state.borrow_mut().pending_edit.take() else {
             return;
         };
+        // 下标在保存这一刻按 id 现查
         let result = match target {
-            Some(pi) => edit_phrase(&a, gi, pi, &text),
-            None => add_phrase(&a, gi, &text),
+            EditTarget::Edit { group, phrase } => {
+                let pos = a.state.borrow().data.phrase_pos(&group, &phrase);
+                pos.ok_or("这条常用语已被删除".to_string())
+                    .and_then(|(gi, pi)| edit_phrase(&a, gi, pi, &text))
+            }
+            EditTarget::Add { group } => {
+                let pos = a.state.borrow().data.group_pos(&group);
+                pos.ok_or("这个分组已被删除".to_string())
+                    .and_then(|gi| add_phrase(&a, gi, &text))
+            }
         };
         if let Err(e) = result {
             a.panel.set_save_error(format!("⚠ {e},未保存").into());
@@ -1074,11 +1147,14 @@ fn wire_panel(app: &Rc<App>) {
                 a.panel.set_repaint_flip(!a.panel.get_repaint_flip());
             }
             winit::event::WindowEvent::Focused(true) => {
-                a.state.borrow_mut().panel_got_focus = true;
+                let mut st = a.state.borrow_mut();
+                if st.panel_phase == PanelPhase::AwaitingFocus {
+                    st.panel_phase = PanelPhase::Focused;
+                }
             }
             // 常驻开启时失焦不隐,收起只走图钉关/点宠/Esc
             winit::event::WindowEvent::Focused(false)
-                if a.state.borrow().panel_got_focus && !a.panel.get_pinned() =>
+                if a.state.borrow().panel_phase == PanelPhase::Focused && !a.panel.get_pinned() =>
             {
                 hide_panel(&a);
             }
@@ -1149,7 +1225,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
             }
         }
         persist_data(app); // 只落盘不刷面板:排序开着也不能在点击瞬间重排列表
-        app.panel.set_copied_idx(i);
+        set_copy_feedback(app, CopyFeedback::Copied(i));
         app.state.borrow_mut().animator.play_once(PetState::Wave);
         let a = app.clone();
         if app.panel.get_pinned() {
@@ -1157,7 +1233,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
             app.hide_timer.start(
                 slint::TimerMode::SingleShot,
                 Duration::from_millis(800),
-                move || a.panel.set_copied_idx(-1),
+                move || set_copy_feedback(&a, CopyFeedback::None),
             );
         } else {
             app.hide_timer.start(
@@ -1168,7 +1244,7 @@ fn copy_item(app: &Rc<App>, i: i32) {
         }
     } else {
         app.state.borrow_mut().animator.play_once(PetState::Failed);
-        app.panel.set_failed_idx(i);
+        set_copy_feedback(app, CopyFeedback::Failed(i));
         app.panel
             .set_save_error("⚠ 复制失败,请重试(剪贴板被其它程序占用)".into());
     }
@@ -1323,7 +1399,7 @@ fn show_panel(app: &Rc<App>) {
         dbg_log("show_panel: no placement (pet native window missing?)");
         return;
     };
-    app.state.borrow_mut().panel_got_focus = false;
+    app.state.borrow_mut().panel_phase = PanelPhase::AwaitingFocus;
     dbg_log(&format!(
         "show_panel: show at {},{} h={h}",
         placement.x, placement.y
@@ -1356,17 +1432,21 @@ fn dbg_log(msg: &str) {
 }
 
 fn hide_panel(app: &Rc<App>) {
-    app.panel.set_grid_open(false);
     app.panel.set_pinned(false); // 收起即解除常驻(点宠/Esc/图钉关,语义一致)
     stash_panel(app);
 }
 
-/// 隐藏面板窗口的唯一收尾(hide_panel 与设置窗暂隐常驻面板共用):关右键菜单与编辑器、隐藏、刷宠物情境
+/// 隐藏面板窗口的唯一收尾(hide_panel 与设置窗暂隐常驻面板共用):关浮层、隐藏、刷宠物情境
 fn stash_panel(app: &Rc<App>) {
-    app.panel.set_ctx_open(false);
-    // 编辑器一并关+清目标:否则重开面板露出陈旧编辑器,期间数据变动过的话 pending_edit 下标错位会改错短语
-    app.panel.set_editor_open(false);
-    app.state.borrow_mut().pending_edit = None;
+    // 复制后的延时收起别带到下一次显示:200ms 内重开面板会被它立刻收掉
+    app.hide_timer.stop();
+    // 浮层一并关+清编辑目标:否则重开面板露出陈旧编辑器
+    app.panel.set_overlay(PanelOverlay::None);
+    {
+        let mut st = app.state.borrow_mut();
+        st.pending_edit = None;
+        st.panel_phase = PanelPhase::Hidden;
+    }
     let _ = app.panel.window().hide();
     update_pet_base(app);
 }
@@ -1376,8 +1456,8 @@ fn stash_panel(app: &Rc<App>) {
 fn open_settings(app: &Rc<App>) {
     // 常驻面板遇设置窗:暂隐(保留图钉),设置关闭后恢复
     if app.panel.get_pinned() && app.panel.window().is_visible() {
-        app.state.borrow_mut().panel_resume_after_settings = true;
         stash_panel(app);
+        app.state.borrow_mut().panel_phase = PanelPhase::Stashed;
     }
     // 先 show 再刷:refresh_pet_cards 只给可见的设置窗干活;同一轮回调内刷完才渲染,不会闪旧内容
     let _ = app.settings_win.show();
@@ -1737,7 +1817,7 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_gallery_search(move |q| {
-        if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
+        if let Gallery::Ready(g) = &mut a.state.borrow_mut().gallery {
             g.filtered = gallery::search(&g.pets, &q);
             g.page = 0;
         }
@@ -1746,7 +1826,7 @@ fn wire_settings(app: &Rc<App>) {
 
     let a = app.clone();
     app.settings_win.on_gallery_page(move |delta| {
-        if let Some(g) = a.state.borrow_mut().gallery.as_mut() {
+        if let Gallery::Ready(g) = &mut a.state.borrow_mut().gallery {
             let pages = g.pages();
             g.page = (g.page as i32 + delta).clamp(0, pages as i32 - 1) as usize;
         }
@@ -2025,23 +2105,21 @@ fn delete_pet(app: &Rc<App>, id: &str) {
 fn open_gallery(app: &Rc<App>) {
     let token = {
         let mut st = app.state.borrow_mut();
-        if st
-            .gallery
-            .as_ref()
-            .is_some_and(|g| g.loading || !g.pets.is_empty())
-        {
+        // 在拉或已拉到就不重拉;拉到的是空库则当没拉到,重进时再试
+        let reuse = match &st.gallery {
+            Gallery::Closed => false,
+            Gallery::Loading(_) => true,
+            Gallery::Ready(g) => !g.pets.is_empty(),
+        };
+        if reuse {
             drop(st);
             refresh_gallery(app);
             return;
         }
-        // 全局递增:关窗置 None 后重开,旧线程的结果也对不上号
+        // 全局递增:关窗回 Closed 后重开,旧线程的结果也对不上号
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let token = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        st.gallery = Some(GalleryState {
-            loading: true,
-            token,
-            ..Default::default()
-        });
+        st.gallery = Gallery::Loading(token);
         token
     };
     app.settings_win
@@ -2053,19 +2131,21 @@ fn open_gallery(app: &Rc<App>) {
                 let q = a.settings_win.get_gallery_query();
                 let failed = {
                     let mut st = a.state.borrow_mut();
-                    if !st.gallery.as_ref().is_some_and(|g| g.token == token) {
+                    if !matches!(st.gallery, Gallery::Loading(t) if t == token) {
                         return; // 期间关过设置窗
                     }
                     match result {
                         Ok(pets) => {
-                            let g = st.gallery.as_mut().expect("checked above");
-                            g.loading = false;
-                            g.filtered = gallery::search(&pets, &q);
-                            g.pets = pets;
+                            st.gallery = Gallery::Ready(GalleryState {
+                                filtered: gallery::search(&pets, &q),
+                                pets,
+                                token,
+                                ..Default::default()
+                            });
                             None
                         }
                         Err(e) => {
-                            st.gallery = None; // 下次进入重新加载
+                            st.gallery = Gallery::Closed; // 下次进入重新加载
                             Some(e)
                         }
                     }
@@ -2086,12 +2166,9 @@ fn refresh_gallery(app: &Rc<App>) {
     let (cards, page, pages, total, fetch) = {
         let mut guard = app.state.borrow_mut();
         let st = &mut *guard;
-        let Some(g) = st.gallery.as_mut() else {
+        let Gallery::Ready(g) = &mut st.gallery else {
             return;
         };
-        if g.loading {
-            return;
-        }
         let pages = g.pages();
         g.page = g.page.min(pages - 1);
         let on_page: Vec<gallery::RemotePet> = g
@@ -2150,8 +2227,9 @@ fn refresh_gallery(app: &Rc<App>) {
             with_app(|a| {
                 let failed = {
                     let mut st = a.state.borrow_mut();
-                    let Some(g) = st.gallery.as_mut().filter(|g| g.token == token) else {
-                        return;
+                    let g = match &mut st.gallery {
+                        Gallery::Ready(g) if g.token == token => g,
+                        _ => return,
                     };
                     match result {
                         Ok(files) => {
@@ -2192,7 +2270,7 @@ fn refresh_gallery(app: &Rc<App>) {
 fn gallery_install(app: &Rc<App>, idx: usize) {
     let pet = {
         let st = app.state.borrow();
-        let Some(g) = st.gallery.as_ref() else {
+        let Gallery::Ready(g) = &st.gallery else {
             return;
         };
         match g.filtered.get(g.page * gallery::PAGE_SIZE + idx) {
@@ -2238,49 +2316,48 @@ fn gallery_install(app: &Rc<App>, idx: usize) {
 
 /* ================= 一键更新 ================= */
 
+/// 更新状态唯一迁移点:状态、设置页按钮、托盘菜单文案一起换。
+/// msg = Some((提示, 是否错误)) 换掉版本号旁的提示,None 保留原提示(自动检查不出声)
+fn set_update_state(app: &Rc<App>, state: UpdateState, msg: Option<(String, bool)>) {
+    app.settings_win.set_update_phase(match &state {
+        UpdateState::Idle => UpdatePhase::Idle,
+        UpdateState::Checking => UpdatePhase::Checking,
+        UpdateState::Available(_) => UpdatePhase::Available,
+        UpdateState::Downloading(_) => UpdatePhase::Downloading,
+    });
+    if let Some((text, is_err)) = msg {
+        app.settings_win.set_update_msg(text.into());
+        app.settings_win.set_update_msg_error(is_err);
+    }
+    app.state.borrow_mut().update = state;
+    sync_update_menu(app);
+}
+
 /// 后台查最新 release;manual = 手动触发(结果无论好坏都提示,自动检查只在发现新版时出声)
 fn start_update_check(app: &Rc<App>, manual: bool) {
-    {
-        let st = app.state.borrow();
-        // 已发现新版则 UI 已是「立即更新」态,重查无意义
-        if st.update_busy || st.update.is_some() {
-            return;
-        }
+    // 只从 Idle 出发:检查/下载中不重入;已发现新版则 UI 已是「立即更新」态,重查无意义
+    if !matches!(app.state.borrow().update, UpdateState::Idle) {
+        return;
     }
-    app.state.borrow_mut().update_busy = true;
-    app.settings_win.set_update_busy(true);
-    if manual {
-        app.settings_win.set_update_msg("正在检查更新…".into());
-        app.settings_win.set_update_msg_error(false);
-    }
+    let say = move |text: String, is_err: bool| manual.then_some((text, is_err));
+    set_update_state(
+        app,
+        UpdateState::Checking,
+        say("正在检查更新…".into(), false),
+    );
     std::thread::spawn(move || {
         let result = updater::fetch_latest(updater::CURRENT_VERSION);
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|a| {
-                a.state.borrow_mut().update_busy = false;
-                a.settings_win.set_update_busy(false);
-                match result {
+                let (state, msg) = match result {
                     Ok(Some(u)) => {
-                        a.settings_win
-                            .set_update_msg(format!("发现新版 v{}", u.version).into());
-                        a.settings_win.set_update_available(true);
-                        a.state.borrow_mut().update = Some(u);
-                        sync_update_menu(a);
+                        let msg = format!("发现新版 v{}", u.version);
+                        (UpdateState::Available(u), Some((msg, false)))
                     }
-                    Ok(None) => {
-                        if manual {
-                            a.settings_win.set_update_msg("已是最新版本 ✓".into());
-                            a.settings_win.set_update_msg_error(false);
-                        }
-                    }
-                    Err(e) => {
-                        if manual {
-                            a.settings_win
-                                .set_update_msg(format!("检查失败:{e}").into());
-                            a.settings_win.set_update_msg_error(true);
-                        }
-                    }
-                }
+                    Ok(None) => (UpdateState::Idle, say("已是最新版本 ✓".into(), false)),
+                    Err(e) => (UpdateState::Idle, say(format!("检查失败:{e}"), true)),
+                };
+                set_update_state(a, state, msg);
             });
         });
     });
@@ -2288,48 +2365,35 @@ fn start_update_check(app: &Rc<App>, manual: bool) {
 
 /// 下载+校验成功后:落盘桌宠位置 → 起静默安装器 → 退出让路(装完由安装器自启新版)
 fn start_update_install(app: &Rc<App>) {
-    let update = {
-        let st = app.state.borrow();
-        if st.update_busy {
-            return;
-        }
-        match &st.update {
-            Some(u) => u.clone(),
-            None => return,
-        }
+    // 只从 Available 出发:下载中再点无效
+    let update = match &app.state.borrow().update {
+        UpdateState::Available(u) => u.clone(),
+        _ => return,
     };
-    app.state.borrow_mut().update_busy = true;
-    app.settings_win.set_update_busy(true);
-    app.settings_win
-        .set_update_msg(format!("正在下载 v{}…", update.version).into());
-    app.settings_win.set_update_msg_error(false);
+    let msg = format!("正在下载 v{}…", update.version);
+    set_update_state(
+        app,
+        UpdateState::Downloading(update.clone()),
+        Some((msg, false)),
+    );
     std::thread::spawn(move || {
         let result = updater::download_and_verify(&update);
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|a| {
-                let path = match &result {
-                    Ok(p) => p,
-                    Err(e) => {
-                        a.state.borrow_mut().update_busy = false;
-                        a.settings_win.set_update_busy(false);
-                        a.settings_win
-                            .set_update_msg(format!("更新失败:{e}").into());
-                        a.settings_win.set_update_msg_error(true);
-                        return;
+                let launched = match result {
+                    Ok(path) => {
+                        // 安装器一起来就 taskkill 本进程,位置必须在起安装器之前落盘
+                        save_pet_pos(a);
+                        updater::launch_installer(&path)
                     }
+                    Err(e) => Err(format!("更新失败:{e}")),
                 };
-                // 安装器一起来就 taskkill 本进程,位置必须在起安装器之前落盘
-                save_pet_pos(a);
-                match updater::launch_installer(path) {
+                match launched {
                     Ok(()) => {
                         let _ = slint::quit_event_loop();
                     }
-                    Err(e) => {
-                        a.state.borrow_mut().update_busy = false;
-                        a.settings_win.set_update_busy(false);
-                        a.settings_win.set_update_msg(e.into());
-                        a.settings_win.set_update_msg_error(true);
-                    }
+                    // 失败回到 Available,按钮恢复可点,可重试
+                    Err(e) => set_update_state(a, UpdateState::Available(update), Some((e, true))),
                 }
             });
         });
@@ -2451,7 +2515,11 @@ fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
         // 打开设置「通用」页(更新区在最上方)给进度/结果反馈
         open_settings(a);
         a.settings_win.set_page(SettingsPage::General);
-        if a.state.borrow().update.is_some() {
+        let found = !matches!(
+            a.state.borrow().update,
+            UpdateState::Idle | UpdateState::Checking
+        );
+        if found {
             // 已发现新版:菜单项此时文案是「升级到 vX.Y.Z」,点击即下载安装
             start_update_install(a);
         } else {
@@ -2465,7 +2533,9 @@ fn on_tray_menu(a: &Rc<App>, id: &tray_icon::menu::MenuId) {
 /// 托盘「检查更新」项文案随已发现的新版走
 fn sync_update_menu(app: &Rc<App>) {
     let st = app.state.borrow();
-    if let (Some(t), Some(u)) = (&st.tray, &st.update) {
+    if let (Some(t), UpdateState::Available(u) | UpdateState::Downloading(u)) =
+        (&st.tray, &st.update)
+    {
         t.update.set_text(format!("升级到 v{}", u.version));
     }
 }

@@ -36,6 +36,9 @@ component CtxMenuRow inherits Rectangle {
     }
 }
 
+// 面板内浮层:同一时刻至多一个(宫格 / 右键菜单 / 就地编辑器),开一个即关其余
+export enum PanelOverlay { none, grid, menu, editor }
+
 export component PanelWindow inherits Window {
     in property <[TabUi]> tabs;
     in property <[PanelItemUi]> items;
@@ -63,20 +66,26 @@ export component PanelWindow inherits Window {
     callback item-delete-requested(int);
     callback item-add-requested(int);
 
-    // 右键菜单状态;ctx-idx = -1 表示空白区域(只给添加)
-    in-out property <bool> ctx-open: false;
+    in-out property <PanelOverlay> overlay;
+    // 浮层开关(含 Slint 侧取消/Esc/保存关闭),Rust 据此切宠物「审阅」动画、清编辑目标
+    callback overlay-changed;
+    changed overlay => {
+        // 编辑器浮层销毁时键盘焦点跟着没了,之后 Esc 和打字搜索全失灵:浮层关了把焦点还给搜索框
+        if (root.overlay == PanelOverlay.none) {
+            search-input.focus();
+        }
+        root.overlay-changed();
+    }
+
+    // 右键菜单落点;ctx-idx = -1 表示空白区域(只给添加)
     property <int> ctx-idx: -1;
     property <length> ctx-x;
     property <length> ctx-y;
 
     // 就地编辑器(编辑/新增共用);文本由 Rust 打开时灌入
-    in-out property <bool> editor-open: false;
     in property <string> editor-text;
     in property <bool> editor-is-add;
     callback editor-saved(string);
-    // 编辑器开关(含 Slint 侧取消/Esc/保存关闭),Rust 据此切宠物「审阅」动画
-    callback editor-toggled;
-    changed editor-open => { root.editor-toggled(); }
 
     // 保存失败横幅文本(Rust 灌入,空 = 无错误;保存成功自动清,点横幅手动关)
     in-out property <string> save-error;
@@ -106,19 +115,13 @@ export component PanelWindow inherits Window {
     default-font-family: "Microsoft YaHei UI";
     default-font-size: 13px;
 
-    in-out property <bool> grid-open: false;
-
     forward-focus: search-input;
 
     FocusScope {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
-                if (root.editor-open) {
-                    root.editor-open = false;
-                } else if (root.ctx-open) {
-                    root.ctx-open = false;
-                } else if (root.grid-open) {
-                    root.grid-open = false;
+                if (root.overlay != PanelOverlay.none) {
+                    root.overlay = PanelOverlay.none;
                 } else {
                     root.escape-pressed();
                 }
@@ -247,7 +250,7 @@ export component PanelWindow inherits Window {
 
                     if root.show-grid-btn: IconButton {
                         icon: @image-url("icons/layout-grid.svg");
-                        clicked => { root.grid-open = !root.grid-open; }
+                        clicked => { root.overlay = root.overlay == PanelOverlay.grid ? PanelOverlay.none : PanelOverlay.grid; }
                     }
                 }
 
@@ -269,7 +272,7 @@ export component PanelWindow inherits Window {
                                     root.ctx-idx = -1;
                                     root.ctx-x = self.absolute-position.x + self.mouse-x;
                                     root.ctx-y = self.absolute-position.y + self.mouse-y;
-                                    root.ctx-open = true;
+                                    root.overlay = PanelOverlay.menu;
                                 }
                             }
                         }
@@ -336,7 +339,7 @@ export component PanelWindow inherits Window {
                                         root.ctx-idx = i;
                                         root.ctx-x = self.absolute-position.x + self.mouse-x;
                                         root.ctx-y = self.absolute-position.y + self.mouse-y;
-                                        root.ctx-open = true;
+                                        root.overlay = PanelOverlay.menu;
                                     }
                                 }
                             }
@@ -394,7 +397,7 @@ export component PanelWindow inherits Window {
         }
 
         // ---- 全组宫格覆层 ----
-        if root.grid-open: Rectangle {
+        if root.overlay == PanelOverlay.grid: Rectangle {
             x: 12px;
             y: 78px;
             width: parent.width - 24px;
@@ -446,7 +449,7 @@ export component PanelWindow inherits Window {
                                 enabled: valid;
                                 mouse-cursor: pointer;
                                 clicked => {
-                                    root.grid-open = false;
+                                    root.overlay = PanelOverlay.none;
                                     root.tab-clicked(flat);
                                 }
                             }
@@ -457,13 +460,13 @@ export component PanelWindow inherits Window {
         }
 
         // ---- 右键菜单(面板内浮层,勿用独立窗口——焦点链会触发失焦自隐) ----
-        if root.ctx-open: Rectangle {
+        if root.overlay == PanelOverlay.menu: Rectangle {
             // 全屏点击拦截:点菜单外任意处关闭
             TouchArea {
-                clicked => { root.ctx-open = false; }
+                clicked => { root.overlay = PanelOverlay.none; }
                 pointer-event(event) => {
                     if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
-                        root.ctx-open = false;
+                        root.overlay = PanelOverlay.none;
                     }
                 }
             }
@@ -489,7 +492,7 @@ export component PanelWindow inherits Window {
                         icon: @image-url("icons/pencil.svg");
                         label: "编辑此条";
                         clicked => {
-                            root.ctx-open = false;
+                            root.overlay = PanelOverlay.none;
                             root.item-edit-requested(root.ctx-idx);
                         }
                     }
@@ -497,7 +500,7 @@ export component PanelWindow inherits Window {
                         icon: @image-url("icons/plus.svg");
                         label: "添加常用语";
                         clicked => {
-                            root.ctx-open = false;
+                            root.overlay = PanelOverlay.none;
                             root.item-add-requested(root.ctx-idx);
                         }
                     }
@@ -506,7 +509,7 @@ export component PanelWindow inherits Window {
                         label: "删除此条";
                         danger: true;
                         clicked => {
-                            root.ctx-open = false;
+                            root.overlay = PanelOverlay.none;
                             root.item-delete-requested(root.ctx-idx);
                         }
                     }
@@ -515,9 +518,9 @@ export component PanelWindow inherits Window {
         }
 
         // ---- 就地编辑器(编辑/新增共用,面板内浮层) ----
-        if root.editor-open: Rectangle {
+        if root.overlay == PanelOverlay.editor: Rectangle {
             background: #0f172a40;
-            TouchArea { clicked => { root.editor-open = false; } }
+            TouchArea { clicked => { root.overlay = PanelOverlay.none; } }
             Rectangle {
                 x: 14px;
                 y: Math.min(70px, (root.height - self.height) / 2);
@@ -543,7 +546,7 @@ export component PanelWindow inherits Window {
                         text: root.editor-text;
                         placeholder: "输入常用语,可多行…";
                         vertical-stretch: 1;
-                        // 浮层随 editor-open 创建,init 即自动聚焦、光标落文末
+                        // 浮层随 overlay == editor 创建,init 即自动聚焦、光标落文末
                         init => { self.focus-end(); }
                     }
                     HorizontalLayout {
@@ -551,13 +554,13 @@ export component PanelWindow inherits Window {
                         spacing: 8px;
                         GhostButton {
                             text: "取消";
-                            clicked => { root.editor-open = false; }
+                            clicked => { root.overlay = PanelOverlay.none; }
                         }
                         PrimaryButton {
                             text: "保存";
                             clicked => {
                                 root.editor-saved(editor-input.text);
-                                root.editor-open = false;
+                                root.overlay = PanelOverlay.none;
                             }
                         }
                     }
