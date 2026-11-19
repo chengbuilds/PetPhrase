@@ -1362,7 +1362,6 @@ fn ensure_panel_native(app: &Rc<App>) {
 /// 贴宠定位(物理像素)
 fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
     let scale = app.pet.window().scale_factor();
-    let panel_h = app.panel.get_panel_h();
     app.pet
         .window()
         .with_winit_window(|w: &winit::window::Window| {
@@ -1385,7 +1384,7 @@ fn compute_panel_placement(app: &Rc<App>) -> Option<logic::Placement> {
                     h: size.height as f32,
                 },
                 logic::PANEL_W * scale,
-                panel_h * scale,
+                logic::PANEL_H * scale,
                 logic::Rect {
                     x: mx,
                     y: my,
@@ -1409,16 +1408,13 @@ fn show_panel(app: &Rc<App>) {
     app.panel.set_search_text("".into());
     app.panel.invoke_reset_scroll();
     refresh_panel(app);
-    // 显示前按内容一次性定高,再按实际高度贴宠定位
-    let h = logic::panel_height(app.panel.get_header_h(), app.panel.get_list_h());
-    app.panel.set_panel_h(h);
     let Some(placement) = compute_panel_placement(app) else {
         dbg_log("show_panel: no placement (pet native window missing?)");
         return;
     };
     app.state.borrow_mut().panel_phase = PanelPhase::AwaitingFocus;
     dbg_log(&format!(
-        "show_panel: show at {},{} h={h}",
+        "show_panel: show at {},{}",
         placement.x, placement.y
     ));
     if let Err(e) = app.panel.show() {
@@ -2600,23 +2596,6 @@ fn quit_app(a: &Rc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// show_panel 在面板显示前读 header-h 定高:布局属性必须不依赖窗口已显示。
-    /// 本进程只有这一个测试碰 Slint 平台(set_platform 全局只能设一次)
-    #[test]
-    fn panel_header_height_is_known_before_show() {
-        use slint::platform::{software_renderer::MinimalSoftwareWindow, Platform, WindowAdapter};
-        struct Headless;
-        impl Platform for Headless {
-            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-                Ok(MinimalSoftwareWindow::new(Default::default()))
-            }
-        }
-        slint::platform::set_platform(Box::new(Headless)).unwrap();
-        let panel = PanelWindow::new().unwrap();
-        let h = panel.get_header_h();
-        assert!(h > 0.0 && h < logic::PANEL_MIN_H, "表头高 {h}");
-    }
 
     #[test]
     fn tray_double_click_toggles_once() {
