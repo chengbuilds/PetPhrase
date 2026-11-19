@@ -42,6 +42,16 @@ impl PhraseData {
     pub fn group_pos(&self, id: &str) -> Option<usize> {
         self.groups.iter().position(|g| g.id == id)
     }
+
+    /// 按 (分组 id, 短语 id) 找 (分组下标, 短语下标);理由同上
+    pub fn phrase_pos(&self, group_id: &str, phrase_id: &str) -> Option<(usize, usize)> {
+        let gi = self.group_pos(group_id)?;
+        let pi = self.groups[gi]
+            .phrases
+            .iter()
+            .position(|p| p.id == phrase_id)?;
+        Some((gi, pi))
+    }
 }
 
 impl Default for PhraseData {
@@ -337,6 +347,21 @@ pub fn snapshot_before_import(dir: &Path, data: &PhraseData) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn phrase_pos_follows_the_id_when_indexes_shift() {
+        let mut data = PhraseData::default();
+        let gid = data.groups[0].id.clone();
+        data.groups[0].phrases = vec![Phrase::new("b".into(), "乙".into())];
+        assert_eq!(data.phrase_pos(&gid, "b"), Some((0, 0)));
+        // 撤销删除把别的短语插回前面:同一个 id 指到新下标,而不是原下标上的另一条
+        data.groups[0]
+            .phrases
+            .insert(0, Phrase::new("a".into(), "甲".into()));
+        assert_eq!(data.phrase_pos(&gid, "b"), Some((0, 1)));
+        assert_eq!(data.phrase_pos(&gid, "gone"), None);
+        assert_eq!(data.phrase_pos("no-such-group", "b"), None);
+    }
 
     #[test]
     fn save_then_load_roundtrip() {
