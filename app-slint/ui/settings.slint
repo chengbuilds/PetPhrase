@@ -212,6 +212,8 @@ export component SettingsWindow inherits Window {
     // 面板按使用频率排序
     in-out property <bool> sort-by-use;
     callback sort-toggled(bool);
+    in-out property <bool> auto-paste;
+    callback auto-paste-toggled(bool);
     // 单槽删除撤销(短语/分组),main.rs UNDO_SECS 内有效
     in property <bool> can-undo;
     callback undo-delete;
@@ -1035,6 +1037,18 @@ export component SettingsWindow inherits Window {
                             toggled(v) => {
                                 root.sort-by-use = v;
                                 root.sort-toggled(v);
+                            }
+                        }
+                    }
+                    SettingRow {
+                        icon: @image-url("icons/zap.svg");
+                        title: "点短语自动粘贴";
+                        desc: "复制后切回刚才的窗口并粘贴;管理员权限的程序里粘不进";
+                        ToggleSwitch {
+                            on: root.auto-paste;
+                            toggled(v) => {
+                                root.auto-paste = v;
+                                root.auto-paste-toggled(v);
                             }
                         }
                     }
