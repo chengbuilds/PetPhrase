@@ -105,6 +105,9 @@ pub struct Settings {
     /// 面板内短语按 use_count 降序排(仅影响面板展示;设置页保持手动序)
     #[serde(default)]
     pub sort_by_use: bool,
+    /// 点短语后切回刚才的窗口并自动粘贴(默认关:仍是只复制)
+    #[serde(default)]
+    pub auto_paste: bool,
     /// 图标位置二选一:false = 系统托盘(默认),true = 任务栏(宠物带任务栏按钮,不建托盘)
     #[serde(default)]
     pub show_in_taskbar: bool,
@@ -131,6 +134,7 @@ impl Default for Settings {
             pet_scale: default_pet_scale(),
             auto_check_update: true,
             sort_by_use: false,
+            auto_paste: false,
             show_in_taskbar: false,
         }
     }

@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anim;
+mod autopaste;
 mod gallery;
 mod logic;
 mod pet_loader;
@@ -574,6 +575,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wire_settings(&app);
     schedule_frame(&app, 0);
     wire_tray_events();
+    autopaste::track_foreground();
 
     // 启动后静默检查一次更新,此后定期重查
     // (开机自启用户一挂数周,只查启动那一次等于永远不查)
@@ -1227,8 +1229,23 @@ fn copy_item(app: &Rc<App>, i: i32) {
         persist_data(app); // 只落盘不刷面板:排序开着也不能在点击瞬间重排列表
         set_copy_feedback(app, CopyFeedback::Copied(i));
         app.state.borrow_mut().animator.play_once(PetState::Wave);
+        let pinned = app.panel.get_pinned();
+        if app.state.borrow().settings.auto_paste {
+            // 先收面板再切回原窗口;常驻面板留着,可连点多条
+            if !pinned {
+                hide_panel(app);
+            }
+            if let Err(e) = autopaste::paste() {
+                app.state.borrow_mut().animator.play_once(PetState::Failed);
+                app.panel
+                    .set_save_error(format!("⚠ 已复制,但自动粘贴失败:{e}").into());
+            }
+            if !pinned {
+                return;
+            }
+        }
         let a = app.clone();
-        if app.panel.get_pinned() {
+        if pinned {
             // 常驻:不收面板,✓ 反馈稍后自清
             app.hide_timer.start(
                 slint::TimerMode::SingleShot,
@@ -1893,6 +1910,12 @@ fn wire_settings(app: &Rc<App>) {
     });
 
     let a = app.clone();
+    app.settings_win.on_auto_paste_toggled(move |on| {
+        a.state.borrow_mut().settings.auto_paste = on;
+        persist_settings(&a);
+    });
+
+    let a = app.clone();
     app.settings_win.on_autostart_toggled(move |on| {
         let result = autostart_handle().and_then(|al| {
             if on {
@@ -2003,6 +2026,8 @@ fn wire_settings(app: &Rc<App>) {
     );
     app.settings_win
         .set_sort_by_use(app.state.borrow().settings.sort_by_use);
+    app.settings_win
+        .set_auto_paste(app.state.borrow().settings.auto_paste);
     app.settings_win
         .set_taskbar_mode(app.state.borrow().settings.show_in_taskbar);
 
