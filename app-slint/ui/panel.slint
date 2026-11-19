@@ -46,8 +46,6 @@ export component PanelWindow inherits Window {
     in property <bool> searching;
     in property <PanelItemUi> add-row;
     in property <float> list-h;
-    // 搜索栏 + 分组 Tab 条总高,Rust 读来给面板定高
-    out property <length> header-h: list-flick.y;
     in property <bool> show-grid-btn;
     in-out property <string> search-text;
     // 复制反馈:命中条目下标,-1 无
@@ -100,16 +98,15 @@ export component PanelWindow inherits Window {
         list-flick.viewport-y = 0;
     }
 
-    // 面板高度:每次显示前由 Rust 按内容一次性算好(不跟手 resize,亚克力逐帧改尺寸会闪)
-    in property <length> panel-h: 400px;
     // 系统丢弃窗口画面后由 Rust 翻转,迫使整窗重画(见 main.rs os_invalidated)
     in property <bool> repaint-flip;
 
     no-frame: true;
     always-on-top: true;
     background: transparent;
+    // 固定尺寸,与 logic::PANEL_W / PANEL_H 一致(切分组不改窗口尺寸:亚克力 resize 会闪)
     width: 300px;
-    height: root.panel-h;
+    height: 400px;
     title: "常用语";
     icon: @image-url("icon.png");
     default-font-family: "Microsoft YaHei UI";
@@ -376,6 +373,8 @@ export component PanelWindow inherits Window {
                         if root.items.length == 0 && !root.searching: VerticalLayout {
                             y: 32px;
                             width: parent.width;
+                            // 不设 start 会撑满列表区高,按钮被拉到底(固定高度后列表区远高于引导区)
+                            alignment: start;
                             spacing: 12px;
                             Text {
                                 horizontal-alignment: center;

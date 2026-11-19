@@ -6,9 +6,8 @@ use crate::storage::PhraseData;
 pub const SHORT_MAX_CHARS: usize = 10;
 pub const FONT_PX: f32 = 13.0;
 pub const PANEL_W: f32 = 300.0;
-/// 面板高度上下限;下限保证就地编辑器(230)放得下
+/// 面板固定高度(与 panel.slint 一致)
 pub const PANEL_H: f32 = 400.0;
-pub const PANEL_MIN_H: f32 = 260.0;
 /// 空分组引导区(提示 + 添加按钮)
 const EMPTY_STATE_H: f32 = 120.0;
 pub const ADD_LABEL: &str = "+ 添加";
@@ -222,12 +221,6 @@ pub fn layout_panel(
     }
 }
 
-/// 面板随内容定高(逻辑像素):显示前算一次,内容少时不留大片空白。
-/// header_h(搜索栏 + 分组 Tab 条)由 Slint 布局给出
-pub fn panel_height(header_h: f32, list_h: f32) -> f32 {
-    (header_h + list_h).clamp(PANEL_MIN_H, PANEL_H)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -339,14 +332,11 @@ mod tests {
     }
 
     #[test]
-    fn panel_layout_add_row_and_height() {
-        const HEADER_H: f32 = 82.0;
+    fn panel_layout_add_row() {
         let few = layout_panel(&data(), 0, "", 280.0, false);
         let add = few.add_row.expect("分组列表末尾有「+ 添加」");
         assert_eq!((add.x, add.y), (0.0, content_height(&few.items) + GAP));
         assert_eq!(few.list_h, add.y + add.h + GAP + LIST_PAD * 2.0);
-        let h = panel_height(HEADER_H, few.list_h);
-        assert!(h > PANEL_MIN_H && h < PANEL_H, "少量内容介于上下限:{h}");
 
         let found = layout_panel(&data(), 0, "好的", 280.0, false);
         assert!(found.searching && found.add_row.is_none(), "搜索态不给添加");
@@ -358,26 +348,6 @@ mod tests {
         d.groups[0].phrases.clear();
         let empty = layout_panel(&d, 0, "", 280.0, false);
         assert!(empty.add_row.is_none(), "空分组显示引导区而非添加行");
-        assert_eq!(
-            panel_height(HEADER_H, empty.list_h),
-            PANEL_MIN_H,
-            "空分组取下限"
-        );
-
-        d.groups[0].phrases = (0..60)
-            .map(|i| {
-                Phrase::new(
-                    i.to_string(),
-                    "这是一条会排成卡片的比较长的常用语内容".into(),
-                )
-            })
-            .collect();
-        let many = layout_panel(&d, 0, "", 280.0, false);
-        assert_eq!(
-            panel_height(HEADER_H, many.list_h),
-            PANEL_H,
-            "超出取上限滚动"
-        );
     }
 
     #[test]
